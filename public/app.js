@@ -537,6 +537,34 @@
     return '<span class="muted">Not analyzed</span>';
   }
 
+  // Pie of reason shares. Each reason keeps its colour whatever the filters, slices and
+  // legend rows both filter the list, and the legend carries the exact count and share.
+  function renderPie(id, rows, order, filterKey) {
+    rows = [...rows].sort((a, b) => b.count - a.count);
+    const total = rows.reduce((a, r) => a + r.count, 0);
+    const active = state.filters[filterKey];
+    const color = (key) => `var(--cat-${order.indexOf(key) + 1})`;
+    const R = 100;
+    let angle = -Math.PI / 2;
+    const point = (a) => `${(R + R * Math.cos(a)).toFixed(2)} ${(R + R * Math.sin(a)).toFixed(2)}`;
+    const slices = rows.map((r) => {
+      const sweep = (r.count / total) * Math.PI * 2;
+      const d = rows.length === 1
+        ? `M ${R} 0 A ${R} ${R} 0 1 1 ${R - 0.01} 0 Z`
+        : `M ${R} ${R} L ${point(angle)} A ${R} ${R} 0 ${sweep > Math.PI ? 1 : 0} 1 ${point(angle + sweep)} Z`;
+      angle += sweep;
+      return `<path d="${d}" fill="${color(r.key)}" data-key="${esc(r.key)}" tabindex="0" role="button" class="${active && active !== r.key ? 'dim' : ''}" aria-label="${esc(r.label)}: ${num(r.count)} (${pct(r.count / total)})"><title>${esc(r.label)}: ${num(r.count)} · ${pct(r.count / total)}</title></path>`;
+    }).join('');
+    $(id).innerHTML = `<div class="pie-wrap"><svg class="pie" viewBox="0 0 200 200" role="img" aria-label="Share of escalations by reason">${slices}</svg>
+      <ul class="pie-legend">${rows.map((r) => `<li data-key="${esc(r.key)}" tabindex="0" role="button" class="${active === r.key ? 'active' : active ? 'dim' : ''}">
+        <span class="swatch" style="background:${color(r.key)}"></span><span>${esc(r.label)}</span><span class="val"><b>${pct(r.count / total)}</b> · ${num(r.count)}</span></li>`).join('')}</ul></div>`;
+    $(id).querySelectorAll('[data-key]').forEach((el) => {
+      const toggle = () => setFilter(filterKey, state.filters[filterKey] === el.dataset.key ? '' : el.dataset.key);
+      el.addEventListener('click', toggle);
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+    });
+  }
+
   function renderEscalations() {
     if (!state.dataset || state.tab !== 'escalations') return;
     const { data, error, loading } = state.escalations;
@@ -559,7 +587,7 @@
 
     const cats = data?.categories || [];
     const counts = cats.map((c) => ({ key: c.key, label: c.label, count: analyzed.filter((r) => r.a.category === c.key).length })).filter((c) => c.count);
-    if (counts.length) renderBarList('esc-categories', counts, 'why');
+    if (counts.length) renderPie('esc-categories', counts, cats.map((c) => c.key), 'why');
     else $('esc-categories').innerHTML = `<div class="empty-state">${loading ? 'Analyzing…' : 'No analyzed sessions for these filters.'}</div>`;
     $('esc-definitions').innerHTML = cats.map((c) => `<dt>${esc(c.label)}</dt><dd>${esc(c.description)}</dd>`).join('');
 

@@ -13,6 +13,12 @@
   --series-1: #2a78d6;
   --series-2: #eb6834;
   --series-unknown: #b4b2a9;
+  --cat-1: #2a78d6;
+  --cat-2: #eb6834;
+  --cat-3: #1baf7a;
+  --cat-4: #eda100;
+  --cat-5: #e87ba4;
+  --cat-6: #008300;
   --good: #006300;
   --critical: #d03b3b;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
@@ -35,6 +41,12 @@
     --series-1: #3987e5;
     --series-2: #d95926;
     --series-unknown: #5d5c57;
+    --cat-1: #3987e5;
+    --cat-2: #d95926;
+    --cat-3: #199e70;
+    --cat-4: #c98500;
+    --cat-5: #d55181;
+    --cat-6: #008300;
     --good: #0ca30c;
     --critical: #e66767;
     --shadow: none;
@@ -55,6 +67,12 @@
   --series-1: #3987e5;
   --series-2: #d95926;
   --series-unknown: #5d5c57;
+  --cat-1: #3987e5;
+  --cat-2: #d95926;
+  --cat-3: #199e70;
+  --cat-4: #c98500;
+  --cat-5: #d55181;
+  --cat-6: #008300;
   --good: #0ca30c;
   --critical: #e66767;
   --shadow: none;
@@ -230,3 +248,16 @@ table.data .empty td { cursor: default; color: var(--muted); text-align: center;
 .why-text { margin-top: 4px; white-space: normal; line-height: 1.4; }
 .esc-note p { margin: 0; }
 .esc-note p + p { margin-top: 6px; }
+
+/* Escalation reasons pie */
+.pie-wrap { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+.pie { width: 200px; height: 200px; flex: none; }
+.pie path { stroke: var(--surface); stroke-width: 1.5; cursor: pointer; transition: opacity 0.15s; }
+.pie path.dim, .pie-legend li.dim { opacity: 0.35; }
+.pie path:focus-visible { outline: none; stroke: var(--text); stroke-width: 2; }
+.pie-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; flex: 1 1 220px; min-width: 0; }
+.pie-legend li { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 3px 6px; margin: 0 -6px; border-radius: 6px; cursor: pointer; }
+.pie-legend li:hover, .pie-legend li.active { background: var(--surface-2); }
+.pie-legend .swatch { width: 12px; height: 12px; border-radius: 3px; }
+.pie-legend .val { font-variant-numeric: tabular-nums; color: var(--text-2); }
+.pie-legend .val b { color: var(--text); font-weight: 600; }
