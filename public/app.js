@@ -102,7 +102,15 @@
   }
 
   // ---------- Data loading ----------
+  let loadSeq = 0;
+  let loadAbort = null;
+
   async function load() {
+    // Only the latest request may update the page: a slow earlier load (say 90 days)
+    // must not land after a quicker later one and show numbers for the wrong range.
+    const seq = ++loadSeq;
+    if (loadAbort) loadAbort.abort();
+    loadAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const main = $('main');
     main.classList.add('loading');
     showBanner('');
@@ -113,8 +121,9 @@
         const { start, end } = currentInterval();
         const qs = new URLSearchParams({ start, end });
         if (state.org) qs.set('org', state.org);
-        const res = await fetch(`api/dataset?${qs}`);
+        const res = await fetch(`api/dataset?${qs}`, { signal: loadAbort?.signal });
         const body = await res.json();
+        if (seq !== loadSeq) return;
         if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
         state.dataset = body;
       }
@@ -124,17 +133,17 @@
       const iv = state.dataset.interval;
       const endShown = new Date(new Date(iv.end).getTime() - 1);
       $('subtitle').textContent = `${new Date(iv.start).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })} – ${endShown.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}${SNAPSHOT ? ' · snapshot' : ''}`;
-      populateOptions();
       main.hidden = false;
       render();
     } catch (err) {
+      if (seq !== loadSeq) return; // superseded by a newer load
       // Don't leave the previous org's or range's numbers on screen under the new selection.
       state.dataset = null;
       main.hidden = true;
       $('updated').textContent = '';
       showBanner(`Couldn’t load data: ${err.message}`, true);
     } finally {
-      main.classList.remove('loading');
+      if (seq === loadSeq) main.classList.remove('loading');
     }
   }
 
@@ -155,17 +164,34 @@
   }
 
   function populateOptions() {
-    const o = M.options(state.dataset.sessions);
-    fillSelect('f-bot', 'All virtual agents', o.bots.map((b) => ({ value: b.id, label: b.name })), state.filters.bot);
-    fillSelect('f-media', 'All channels', o.media, state.filters.media);
-    fillSelect('f-intent', 'All intents', o.intents, state.filters.intent);
-    fillSelect('f-result', 'All exit reasons', o.results.map((r) => ({ value: r.code, label: r.label })), state.filters.result);
+    const optionsWithout = (key) => M.options(M.applyFilters(state.dataset.sessions, filterSpec(key)));
+    fillSelect('f-bot', 'All virtual agents', optionsWithout('bot').bots.map((b) => ({ value: b.id, label: b.name })), state.filters.bot);
+    fillSelect('f-media', 'All channels', optionsWithout('media').media, state.filters.media);
+    fillSelect('f-intent', 'All intents', optionsWithout('intent').intents, state.filters.intent);
+    fillSelect('f-result', 'All exit reasons', optionsWithout('result').results.map((r) => ({ value: r.code, label: r.label })), state.filters.result);
+  }
+
+  // Filters as metrics.applyFilters expects them; `except` leaves one out, which is how
+  // each dropdown lists only the values that still match the other active filters.
+  function filterSpec(except) {
+    const f = { ...state.filters };
+    if (except) f[except] = '';
+    return {
+      botIds: f.bot ? [f.bot] : null,
+      media: f.media,
+      intent: f.intent,
+      containment: f.containment,
+      botResult: f.result,
+      recognitionFailure: f.failure,
+      search: f.search,
+    };
   }
 
   // ---------- Rendering ----------
   function render() {
     if (!state.dataset) return;
     const f = state.filters;
+    populateOptions();
     state.filtered = M.applyFilters(state.dataset.sessions, {
       botIds: f.bot ? [f.bot] : null,
       media: f.media,
@@ -173,6 +199,7 @@
       containment: f.containment,
       botResult: f.result,
       recognitionFailure: f.failure,
+      search: f.search,
     });
     for (const [k, id] of Object.entries(FILTER_IDS)) $(id).value = f[k];
     $('f-search').value = f.search;
@@ -359,8 +386,7 @@
   ];
 
   function searchedSessions() {
-    const q = state.filters.search.trim().toLowerCase();
-    const rows = q ? state.filtered.filter((s) => `${s.conversationId || ''} ${s.id}`.toLowerCase().includes(q)) : state.filtered.slice();
+    const rows = state.filtered.slice(); // search is already applied with the other filters
     const col = SESSION_COLUMNS.find((c) => c.key === state.sort.key) || SESSION_COLUMNS[0];
     rows.sort((a, b) => {
       const va = col.value(a), vb = col.value(b);
@@ -597,7 +623,7 @@
     let searchTimer;
     $('f-search').addEventListener('input', (e) => {
       clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => { state.filters.search = e.target.value; state.page = 1; writeHash(); renderSessions(); }, 150);
+      searchTimer = setTimeout(() => setFilter('search', e.target.value), 150);
     });
     $('f-reset').addEventListener('click', () => {
       for (const k of Object.keys(state.filters)) state.filters[k] = '';
