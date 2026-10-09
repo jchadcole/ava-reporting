@@ -25,7 +25,7 @@
     return `${Math.round(h / 24)}d`;
   }
 
-  const FILTER_IDS = { bot: 'f-bot', media: 'f-media', intent: 'f-intent', containment: 'f-containment', result: 'f-result', failure: 'f-failure' };
+  const FILTER_IDS = { bot: 'f-bot', media: 'f-media', intent: 'f-intent', containment: 'f-containment', result: 'f-result', failure: 'f-failure', preview: 'f-preview' };
 
   const state = {
     org: '',
@@ -33,7 +33,7 @@
     range: '30',
     from: null,
     to: null,
-    filters: { bot: '', media: '', intent: '', containment: '', result: '', failure: '', search: '' },
+    filters: { bot: '', media: '', intent: '', containment: '', result: '', failure: '', preview: '', search: '' },
     dataset: null,
     filtered: [],
     page: 1,
@@ -183,6 +183,7 @@
       containment: f.containment,
       botResult: f.result,
       recognitionFailure: f.failure,
+      preview: f.preview || 'exclude', // preview (test) sessions are hidden unless asked for
       search: f.search,
     };
   }
@@ -192,15 +193,7 @@
     if (!state.dataset) return;
     const f = state.filters;
     populateOptions();
-    state.filtered = M.applyFilters(state.dataset.sessions, {
-      botIds: f.bot ? [f.bot] : null,
-      media: f.media,
-      intent: f.intent,
-      containment: f.containment,
-      botResult: f.result,
-      recognitionFailure: f.failure,
-      search: f.search,
-    });
+    state.filtered = M.applyFilters(state.dataset.sessions, filterSpec());
     for (const [k, id] of Object.entries(FILTER_IDS)) $(id).value = f[k];
     $('f-search').value = f.search;
     writeHash();
@@ -417,7 +410,7 @@
     el.innerHTML = `<thead><tr>${SESSION_COLUMNS.map((c) => `<th data-sort="${c.key}" class="${c.num ? 'num' : ''}">${c.label}${arrow(c.key)}</th>`).join('')}</tr></thead><tbody>` +
       (pageRows.length ? pageRows.map((s) => `<tr data-id="${esc(s.id)}" tabindex="0">
         <td><div>${esc(fmtDateTime(s.start))}</div></td>
-        <td><div class="cell-strong">${esc(s.botName)}</div></td>
+        <td><div class="cell-strong">${esc(s.botName)}</div>${s.preview ? '<div class="cell-sub">Preview test</div>' : ''}</td>
         <td>${esc(s.media || '')}</td>
         <td>${outcomeBadge(s)}${s.queueName && s.escalation ? `<div class="cell-sub">${esc(s.queueName)}</div>` : ''}</td>
         <td>${esc(M.resultLabel(s.botResult))}${s.recognitionFailures ? `<div class="cell-sub">${s.recognitionFailures} recognition failure${s.recognitionFailures > 1 ? 's' : ''}</div>` : ''}</td>
@@ -447,9 +440,9 @@
 
   function exportCsv() {
     const rows = searchedSessions();
-    const header = ['Started', 'Virtual agent', 'Bot ID', 'Channel', 'Outcome', 'Escalation', 'Queue', 'Bot exit', 'Intents', 'Final intent', 'Recognition failures', 'Turns', 'Length (s)', 'Median response (ms)', 'Longest response (ms)', 'Conversation ID', 'Bot session ID'];
+    const header = ['Started', 'Virtual agent', 'Bot ID', 'Channel', 'Outcome', 'Escalation', 'Queue', 'Bot exit', 'Intents', 'Final intent', 'Recognition failures', 'Turns', 'Length (s)', 'Median response (ms)', 'Longest response (ms)', 'Conversation ID', 'Bot session ID', 'Preview'];
     const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const lines = [header.map(cell).join(',')].concat(rows.map((s) => [s.start, s.botName, s.botId, s.media, M.containment(s), s.escalation ?? 'estimated', s.queueName, M.resultLabel(s.botResult), s.intents.join('; '), s.finalIntent, s.recognitionFailures, s.turns, s.durationMs == null ? '' : Math.round(s.durationMs / 1000), M.sessionResponse(s).medianResponseMs ?? '', M.sessionResponse(s).maxResponseMs ?? '', s.conversationId, s.id].map(cell).join(',')));
+    const lines = [header.map(cell).join(',')].concat(rows.map((s) => [s.start, s.botName, s.botId, s.media, M.containment(s), s.escalation ?? 'estimated', s.queueName, M.resultLabel(s.botResult), s.intents.join('; '), s.finalIntent, s.recognitionFailures, s.turns, s.durationMs == null ? '' : Math.round(s.durationMs / 1000), M.sessionResponse(s).medianResponseMs ?? '', M.sessionResponse(s).maxResponseMs ?? '', s.conversationId, s.id, s.preview ? 'yes' : 'no'].map(cell).join(',')));
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -523,11 +516,13 @@
       const qs = new URLSearchParams({ start: state.dataset.interval.start, end: state.dataset.interval.end });
       if (state.org) qs.set('org', state.org);
       if (bot) qs.set('bot', bot);
+      const preview = state.filters.preview || 'exclude';
+      qs.set('preview', preview);
       const res = await fetch(`api/verify?${qs}`);
       const genesys = await res.json();
       if (!res.ok) throw new Error(genesys.error || `Request failed (${res.status})`);
       if ($('drawer-title').textContent !== 'Check against Genesys') return;
-      const mine = M.verificationTotals(M.applyFilters(state.dataset.sessions, { botIds: bot ? [bot] : null }));
+      const mine = M.verificationTotals(M.applyFilters(state.dataset.sessions, { botIds: bot ? [bot] : null, preview }));
       body.innerHTML = verifyHtml(mine, genesys, !!bot);
     } catch (err) {
       body.innerHTML = `<div class="empty-state">Couldn’t get Genesys totals: ${esc(err.message)}</div>`;
@@ -548,7 +543,7 @@
       .sort((a, b) => b[2] - a[2] || b[1] - a[1]);
     const intentDiffs = intents.filter(([, a, b]) => a !== b).length;
     return `<section class="verify-note">
-        <p class="verify-note">Genesys’s numbers below come from separate queries to its own analytics, for the same org and time range${oneBot ? ' and virtual agent' : ''}. Only the virtual agent filter applies here; other filters are ignored. ${diffs || intentDiffs ? `${diffs + intentDiffs} row${diffs + intentDiffs > 1 ? 's differ' : ' differs'}; see the notes below.` : 'Every row matches.'}</p>
+        <p class="verify-note">Genesys’s numbers below come from separate queries to its own analytics, for the same org and time range${oneBot ? ' and virtual agent' : ''}. Only the virtual agent and preview session filters apply here; other filters are ignored. ${diffs || intentDiffs ? `${diffs + intentDiffs} row${diffs + intentDiffs > 1 ? 's differ' : ' differs'}; see the notes below.` : 'Every row matches.'}</p>
       </section>
       <section><h3>Totals</h3><div class="table-wrap"><table class="data"><thead><tr><th>Measure</th><th class="num">Dashboard</th><th class="num">Genesys</th><th>Check</th></tr></thead><tbody>
         ${rows.map(([k, label, source]) => `<tr style="cursor:default"><td><div class="cell-strong">${esc(label)}</div><div class="cell-sub">${esc(source)}</div></td><td class="num">${num(mine.totals[k])}</td><td class="num">${num(genesys.totals[k])}</td>${checkCell(mine.totals[k], genesys.totals[k])}</tr>`).join('')}

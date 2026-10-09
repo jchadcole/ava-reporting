@@ -50,6 +50,14 @@ test('applyFilters matches bot, intent (including final intent), outcome and fai
   assert.equal(M.applyFilters(rows, { media: 'Messaging' }).length, 1);
 });
 
+test('applyFilters hides, includes or isolates preview sessions', () => {
+  const rows = [session({ preview: true }), session({ preview: false }), session({})];
+  assert.equal(M.applyFilters(rows, { preview: 'exclude' }).length, 2);
+  assert.equal(M.applyFilters(rows, { preview: 'include' }).length, 3);
+  assert.equal(M.applyFilters(rows, { preview: 'only' }).length, 1);
+  assert.equal(M.applyFilters(rows, {}).length, 3);
+});
+
 test('byDay fills empty days in the interval', () => {
   const days = M.byDay([session({ start: '2026-10-02T12:00:00', escalation: 'none' })], '2026-10-01T00:00:00', '2026-10-04T00:00:00');
   assert.deepEqual(days.map((d) => d.day), ['2026-10-01', '2026-10-02', '2026-10-03']);

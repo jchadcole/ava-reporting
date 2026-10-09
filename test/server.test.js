@@ -86,3 +86,12 @@ test('readOrgConfigs falls back to the single-org variables', () => {
   assert.deepEqual(readOrgConfigs({ GENESYS_CLIENT_ID: 'a', GENESYS_CLIENT_SECRET: 'b' }).map((c) => [c.key, c.region]), [['default', 'mypurecloud.com']]);
   assert.equal(readOrgConfigs({}).length, 0);
 });
+
+test('verify sums respect the preview filter and skip survey bots', () => {
+  const { sumMetric } = require('../server/verify');
+  const g = (botFlowType, previewMode, count) => ({ group: { botFlowType, previewMode }, data: [{ metrics: [{ metric: 'nBotSessions', stats: { count } }] }] });
+  const results = [g('BOT', undefined, 5), g('DIGITALBOT', 'true', 2), g('VOICESURVEY', undefined, 9)];
+  assert.equal(sumMetric(results, 'nBotSessions', 'count', 'exclude'), 5);
+  assert.equal(sumMetric(results, 'nBotSessions', 'count', 'include'), 7);
+  assert.equal(sumMetric(results, 'nBotSessions', 'count', 'only'), 2);
+});

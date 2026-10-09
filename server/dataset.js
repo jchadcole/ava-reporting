@@ -251,7 +251,7 @@ async function buildDataset(client, startIso, endIso) {
   // Daily buckets only serve as a fallback timestamp when conversation details are missing.
   const granularity = endMs - startMs > DAY_MS ? 'P1D' : undefined;
 
-  const [names, core, intents, failures, finals, details] = await Promise.all([
+  const [names, core, intents, failures, finals, previews, details] = await Promise.all([
     botAgg(request, interval, ['botId', 'botName', 'botFlowType'], ['nBotSessions']),
     botAgg(
       request,
@@ -263,6 +263,8 @@ async function buildDataset(client, startIso, endIso) {
     botAgg(request, interval, ['botSessionId', 'botIntent'], ['oBotIntent']),
     botAgg(request, interval, ['botSessionId', 'botRecognitionFailureReason'], ['tBotRecognitionFailure']),
     botAgg(request, interval, ['botSessionId', 'botFinalIntent'], ['tBotExit', 'tBotDisconnect']),
+    // Sessions run from Architect's preview (test) mode; the browser hides them by default.
+    botAgg(request, interval, ['botSessionId', 'previewMode'], ['nBotSessions']),
     fetchConversationSummaries(request, startMs, endMs),
   ]);
 
@@ -275,6 +277,8 @@ async function buildDataset(client, startIso, endIso) {
     merged.filter((s) => !EXCLUDED_BOT_TYPES.has(s.botType)),
     details.conversations
   );
+  const previewIds = new Set((previews.results || []).filter((r) => String(r.group.previewMode) === 'true').map((r) => r.group.botSessionId));
+  for (const s of sessions) s.preview = previewIds.has(s.id);
   const botIds = [...new Set(sessions.map((s) => s.botId).filter((id) => id && !id.includes('?')))];
   const responses = await fetchResponseTimes(request, botIds, interval);
   for (const s of sessions) s.responseTimesMs = responses.bySession.get(s.id) || [];

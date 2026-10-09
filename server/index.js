@@ -70,10 +70,12 @@ async function handleApi(req, res, url) {
     const start = url.searchParams.get('start');
     const end = url.searchParams.get('end');
     const bot = url.searchParams.get('bot') || null;
+    const preview = url.searchParams.get('preview') || 'include';
+    if (!['exclude', 'include', 'only'].includes(preview)) return sendJson(res, 400, { error: 'preview must be exclude, include or only' });
     if (Number.isNaN(Date.parse(start)) || Number.isNaN(Date.parse(end))) return sendJson(res, 400, { error: 'start and end must be ISO timestamps' });
     if (bot && !ID_PATTERN.test(bot)) return sendJson(res, 400, { error: 'Invalid bot' });
-    const key = `verify:${org.key}:${start}:${end}:${bot}`;
-    return sendJson(res, 200, await cached(key, () => buildVerification(org.client, start, end, bot)));
+    const key = `verify:${org.key}:${start}:${end}:${bot}:${preview}`;
+    return sendJson(res, 200, await cached(key, () => buildVerification(org.client, start, end, bot, preview)));
   }
 
   if (url.pathname === '/api/session') {

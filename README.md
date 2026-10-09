@@ -5,7 +5,7 @@ Custom reporting for Genesys Cloud virtual agents (bots and AI Virtual Agents). 
 ## What's on the dashboard
 
 - **Genesys org**: pick which org to report on when more than one is configured (see [Several orgs](#several-orgs)).
-- **Filters**: date range (presets or custom, up to 92 days), virtual agent, channel, intent, outcome (contained or escalated), bot exit reason, and recognition failure. Filters apply to every panel and are kept in the URL, so a filtered view can be bookmarked.
+- **Filters**: date range (presets or custom, up to 92 days), virtual agent, channel, intent, outcome (contained or escalated), bot exit reason, recognition failure, and preview sessions (test sessions from Architect's preview mode, left out by default). Filters apply to every panel and are kept in the URL, so a filtered view can be bookmarked.
 - **Key metrics**: bot sessions, containment rate, sessions that reached an agent, query self-service rate, intent recognition rate, recognition failure rate, turns per session, median session length, and bot response time (median and longest).
 - **Sessions per day**: contained versus escalated.
 - **Why sessions left the bot**: Genesys bot results (customer asked to leave, bot handed back, customer disconnected, recognition failure exits, errors). Select a bar to filter.

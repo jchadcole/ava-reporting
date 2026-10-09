@@ -43,6 +43,8 @@
     const bots = f.botIds && f.botIds.length ? new Set(f.botIds) : null;
     const q = (f.search || '').trim().toLowerCase();
     return sessions.filter((s) => {
+      if (f.preview === 'exclude' && s.preview) return false;
+      if (f.preview === 'only' && !s.preview) return false;
       if (bots && !bots.has(s.botId)) return false;
       if (f.media && s.media !== f.media) return false;
       if (f.intent && !(s.intents.includes(f.intent) || s.finalIntent === f.intent)) return false;
