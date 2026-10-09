@@ -25,7 +25,7 @@
     return `${Math.round(h / 24)}d`;
   }
 
-  const FILTER_IDS = { bot: 'f-bot', media: 'f-media', intent: 'f-intent', containment: 'f-containment', result: 'f-result', failure: 'f-failure', preview: 'f-preview' };
+  const FILTER_IDS = { bot: 'f-bot', media: 'f-media', intent: 'f-intent', containment: 'f-containment', result: 'f-result', failure: 'f-failure', intentCount: 'f-intentcount', preview: 'f-preview' };
 
   const state = {
     org: '',
@@ -33,7 +33,7 @@
     range: '30',
     from: null,
     to: null,
-    filters: { bot: '', media: '', intent: '', containment: '', result: '', failure: '', preview: '', search: '' },
+    filters: { bot: '', media: '', intent: '', intentCount: '', containment: '', result: '', failure: '', preview: '', search: '' },
     dataset: null,
     filtered: [],
     page: 1,
@@ -180,6 +180,7 @@
       botIds: f.bot ? [f.bot] : null,
       media: f.media,
       intent: f.intent,
+      intentCount: f.intentCount,
       containment: f.containment,
       botResult: f.result,
       recognitionFailure: f.failure,
@@ -212,7 +213,7 @@
       { label: 'Containment rate', value: pct(s.containmentRate, 1), meter: s.containmentRate, sub: s.inferred ? `${num(s.inferred)} estimated from bot outcome` : 'Never reached a queue or agent' },
       { label: 'Reached an agent', value: pct(s.agentRate, 1), meter: s.agentRate, sub: `${num(s.reachedAgent)} sessions` },
       { label: 'Query self-service rate', value: pct(s.selfServiceRate, 1), meter: s.selfServiceRate, sub: `${num(s.queries)} questions asked` },
-      { label: 'Intent recognized', value: pct(s.intentRate, 1), meter: s.intentRate, sub: 'Sessions matching ≥1 intent' },
+      { label: 'Intent recognized', value: pct(s.intentRate, 1), meter: s.intentRate, sub: s.multiIntent ? `${num(s.multiIntent)} session${s.multiIntent > 1 ? 's' : ''} matched more than one` : 'Sessions matching ≥1 intent' },
       { label: 'Recognition failures', value: pct(s.recognitionFailureRate, 1), meter: s.recognitionFailureRate, sub: 'Sessions with no-match / no-input' },
       { label: 'Turns per session', value: num(s.avgTurns, 1), sub: 'Average' },
       { label: 'Session length', value: fmtDuration(s.medianDurationMs), sub: 'Median' },
@@ -336,13 +337,31 @@
 
   const rateCell = (v) => `<td class="num"><span class="rate">${pct(v)}<span class="rate-bar"><span style="width:${v == null ? 0 : (v * 100).toFixed(1)}%"></span></span></span></td>`;
 
+  // A session's intents in the order they were recognized ("A → B → A"); without turn data
+  // the order is unknown, so they're shown as plain chips.
+  function intentChips(s) {
+    const path = M.intentPath(s);
+    if (!path.length) return '<span class="muted">–</span>';
+    const ordered = s.intentPath || [];
+    const extra = path.slice(ordered.length);
+    const chip = (i) => `<span class="chip">${esc(i)}</span>`;
+    const arrow = '<span class="path-arrow" aria-hidden="true">→</span>';
+    return `<div class="chips intent-path">${ordered.map(chip).join(arrow)}${extra.map(chip).join('')}</div>`;
+  }
+
+  function intentText(s) {
+    const ordered = s.intentPath || [];
+    const extra = M.intentPath(s).slice(ordered.length);
+    return [ordered.map(esc).join(' → '), extra.map(esc).join(', ')].filter(Boolean).join(', ') || '–';
+  }
+
   function renderIntents(rows) {
     const el = $('intents');
-    el.innerHTML = `<thead><tr><th>Intent</th><th class="num">Sessions</th><th class="num">Share</th><th class="num">Contained</th><th class="num">Reached agent</th><th class="num">Avg turns</th><th class="num">Recog. failures</th><th class="num">Final intent</th></tr></thead><tbody>` +
+    el.innerHTML = `<thead><tr><th>Intent</th><th class="num">Sessions</th><th class="num" title="Times the intent was recognized, counting repeats within a session">Matches</th><th class="num">Share</th><th class="num">Contained</th><th class="num">Reached agent</th><th class="num">Avg turns</th><th class="num">Recog. failures</th><th class="num">Final intent</th></tr></thead><tbody>` +
       (rows.length ? visibleRows('intents', rows, (r) => r.intent === state.filters.intent).map((r) => `<tr data-key="${esc(r.intent)}" class="${state.filters.intent === r.intent ? 'active' : ''}" tabindex="0">
-        <td class="cell-strong">${esc(r.intent)}</td><td class="num">${num(r.sessions)}</td><td class="num">${pct(r.share)}</td>${rateCell(r.containmentRate)}<td class="num">${pct(r.agentRate)}</td>
+        <td class="cell-strong">${esc(r.intent)}</td><td class="num">${num(r.sessions)}</td><td class="num">${num(r.matches)}</td><td class="num">${pct(r.share)}</td>${rateCell(r.containmentRate)}<td class="num">${pct(r.agentRate)}</td>
         <td class="num">${num(r.avgTurns, 1)}</td><td class="num">${pct(r.recognitionFailureRate)}</td><td class="num">${num(r.asFinal)}</td></tr>`).join('')
-        : '<tr class="empty"><td colspan="8">No intents were recognized in these sessions.</td></tr>') + '</tbody>';
+        : '<tr class="empty"><td colspan="9">No intents were recognized in these sessions.</td></tr>') + '</tbody>';
     bindRowFilter(el, 'intent');
     renderShowMore('intents', rows.length);
   }
@@ -372,7 +391,7 @@
     { key: 'media', label: 'Channel', value: (s) => s.media || '' },
     { key: 'containment', label: 'Outcome', value: (s) => M.containment(s) },
     { key: 'botResult', label: 'Bot exit', value: (s) => M.resultLabel(s.botResult) },
-    { key: 'intents', label: 'Intents', value: (s) => s.intents.join(', ') },
+    { key: 'intents', label: 'Intents', value: (s) => M.intentPath(s).join(' > ') },
     { key: 'turns', label: 'Turns', value: (s) => s.turns, num: true },
     { key: 'durationMs', label: 'Length', value: (s) => s.durationMs ?? -1, num: true },
     { key: 'response', label: 'Response (median · max)', value: (s) => M.sessionResponse(s).maxResponseMs ?? -1, num: true },
@@ -414,7 +433,7 @@
         <td>${esc(s.media || '')}</td>
         <td>${outcomeBadge(s)}${s.queueName && s.escalation ? `<div class="cell-sub">${esc(s.queueName)}</div>` : ''}</td>
         <td>${esc(M.resultLabel(s.botResult))}${s.recognitionFailures ? `<div class="cell-sub">${s.recognitionFailures} recognition failure${s.recognitionFailures > 1 ? 's' : ''}</div>` : ''}</td>
-        <td><div class="chips">${s.intents.map((i) => `<span class="chip">${esc(i)}</span>`).join('') || '<span class="muted">–</span>'}</div></td>
+        <td>${intentChips(s)}</td>
         <td class="num">${num(s.turns)}</td>
         <td class="num">${fmtDuration(s.durationMs)}</td>
         <td class="num">${responseCell(s)}</td></tr>`).join('')
@@ -440,9 +459,9 @@
 
   function exportCsv() {
     const rows = searchedSessions();
-    const header = ['Started', 'Virtual agent', 'Bot ID', 'Channel', 'Outcome', 'Escalation', 'Queue', 'Bot exit', 'Intents', 'Final intent', 'Recognition failures', 'Turns', 'Length (s)', 'Median response (ms)', 'Longest response (ms)', 'Conversation ID', 'Bot session ID', 'Preview'];
+    const header = ['Started', 'Virtual agent', 'Bot ID', 'Channel', 'Outcome', 'Escalation', 'Queue', 'Bot exit', 'Intents (in order)', 'Final intent', 'Recognition failures', 'Turns', 'Length (s)', 'Median response (ms)', 'Longest response (ms)', 'Conversation ID', 'Bot session ID', 'Preview'];
     const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const lines = [header.map(cell).join(',')].concat(rows.map((s) => [s.start, s.botName, s.botId, s.media, M.containment(s), s.escalation ?? 'estimated', s.queueName, M.resultLabel(s.botResult), s.intents.join('; '), s.finalIntent, s.recognitionFailures, s.turns, s.durationMs == null ? '' : Math.round(s.durationMs / 1000), M.sessionResponse(s).medianResponseMs ?? '', M.sessionResponse(s).maxResponseMs ?? '', s.conversationId, s.id, s.preview ? 'yes' : 'no'].map(cell).join(',')));
+    const lines = [header.map(cell).join(',')].concat(rows.map((s) => [s.start, s.botName, s.botId, s.media, M.containment(s), s.escalation ?? 'estimated', s.queueName, M.resultLabel(s.botResult), M.intentPath(s).join(' > '), s.finalIntent, s.recognitionFailures, s.turns, s.durationMs == null ? '' : Math.round(s.durationMs / 1000), M.sessionResponse(s).medianResponseMs ?? '', M.sessionResponse(s).maxResponseMs ?? '', s.conversationId, s.id, s.preview ? 'yes' : 'no'].map(cell).join(',')));
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -573,7 +592,7 @@
       ['Turns', num(s.turns)],
       ['Bot session length', fmtDuration(s.durationMs)],
       ['Bot response (median · longest)', M.sessionResponse(s).responseTurns ? `${fmtMs(M.sessionResponse(s).medianResponseMs)} · ${fmtMs(M.sessionResponse(s).maxResponseMs)}` : '–'],
-      ['Intents', s.intents.length ? s.intents.map(esc).join(', ') : '–', true],
+      ['Intents', intentText(s), true],
       ['Final intent', esc(s.finalIntent || '–'), true],
       ['Recognition failures', s.recognitionFailures ? `${s.recognitionFailures} (${s.recognitionFailureReasons.map((r) => esc(M.failureLabel(r))).join(', ')})` : '0', true],
       ['Questions self-served', s.queries ? `${num(s.selfServedQueries)} of ${num(s.queries)}` : '–'],

@@ -213,8 +213,12 @@ function attachConversations(sessions, conversations) {
 
 // Bot response time per customer turn, keyed by bot session id. Reporting turns are
 // only available per bot, so each bot with sessions in the interval is paged through.
-async function fetchResponseTimes(request, botIds, interval) {
+// Reads every turn for each bot once and keeps, per session, the bot response times and the
+// intents recognized in turn order (a looping bot such as Navigator can match several, or the
+// same one twice, which the per-session aggregates can't show).
+async function fetchTurnData(request, botIds, interval) {
   const bySession = new Map();
+  const intentTurns = new Map();
   let truncated = false;
   await mapLimit(botIds, 4, async (botId) => {
     let path = `/api/v2/analytics/botflows/${encodeURIComponent(botId)}/reportingturns?pageSize=${TURN_PAGE_SIZE}&interval=${encodeURIComponent(interval)}`;
@@ -231,6 +235,10 @@ async function fetchResponseTimes(request, botIds, interval) {
         break; // some bot types (third-party, some digital bots) don't report turns
       }
       for (const t of res.entities || []) {
+        if (t.sessionId && t.intent?.name) {
+          if (!intentTurns.has(t.sessionId)) intentTurns.set(t.sessionId, []);
+          intentTurns.get(t.sessionId).push([t.dateCreated || '', t.intent.name]);
+        }
         const ms = turnResponseMs(t);
         if (ms == null || !t.sessionId) continue;
         if (!bySession.has(t.sessionId)) bySession.set(t.sessionId, []);
@@ -239,7 +247,9 @@ async function fetchResponseTimes(request, botIds, interval) {
       path = res.nextUri || null;
     }
   });
-  return { bySession, truncated };
+  const intentPaths = new Map();
+  for (const [id, list] of intentTurns) intentPaths.set(id, list.sort((a, b) => a[0].localeCompare(b[0])).map(([, name]) => name));
+  return { bySession, intentPaths, truncated };
 }
 
 async function buildDataset(client, startIso, endIso) {
@@ -280,8 +290,11 @@ async function buildDataset(client, startIso, endIso) {
   const previewIds = new Set((previews.results || []).filter((r) => String(r.group.previewMode) === 'true').map((r) => r.group.botSessionId));
   for (const s of sessions) s.preview = previewIds.has(s.id);
   const botIds = [...new Set(sessions.map((s) => s.botId).filter((id) => id && !id.includes('?')))];
-  const responses = await fetchResponseTimes(request, botIds, interval);
-  for (const s of sessions) s.responseTimesMs = responses.bySession.get(s.id) || [];
+  const responses = await fetchTurnData(request, botIds, interval);
+  for (const s of sessions) {
+    s.responseTimesMs = responses.bySession.get(s.id) || [];
+    s.intentPath = responses.intentPaths.get(s.id) || [];
+  }
   sessions.sort((a, b) => (b.start || '').localeCompare(a.start || ''));
 
   return {

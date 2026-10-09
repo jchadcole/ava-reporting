@@ -5,14 +5,14 @@ Custom reporting for Genesys Cloud virtual agents (bots and AI Virtual Agents). 
 ## What's on the dashboard
 
 - **Genesys org**: pick which org to report on when more than one is configured (see [Several orgs](#several-orgs)).
-- **Filters**: date range (presets or custom, up to 92 days), virtual agent, channel, intent, outcome (contained or escalated), bot exit reason, recognition failure, and preview sessions (test sessions from Architect's preview mode, left out by default). Filters apply to every panel and are kept in the URL, so a filtered view can be bookmarked.
+- **Filters**: date range (presets or custom, up to 92 days), virtual agent, channel, intent, outcome (contained or escalated), bot exit reason, recognition failure, intents per session (none, one, more than one), and preview sessions (test sessions from Architect's preview mode, left out by default). Filters apply to every panel and are kept in the URL, so a filtered view can be bookmarked.
 - **Key metrics**: bot sessions, containment rate, sessions that reached an agent, query self-service rate, intent recognition rate, recognition failure rate, turns per session, median session length, and bot response time (median and longest).
 - **Sessions per day**: contained versus escalated.
 - **Why sessions left the bot**: Genesys bot results (customer asked to leave, bot handed back, customer disconnected, recognition failure exits, errors). Select a bar to filter.
-- **Intent performance**: per intent, its sessions, share, containment, agent rate, turns, recognition failures, and how often it was the final intent.
+- **Intent performance**: per intent, its sessions, matches (counting repeats within a session), share, containment, agent rate, turns, recognition failures, and how often it was the final intent.
 - **Recognition failures**: no-match versus no-input.
 - **Virtual agents**: the same metrics per bot, including median and longest bot response time.
-- **Sessions**: sortable, searchable by conversation ID, exportable to CSV. Each session shows its median and longest bot response time. Selecting a session opens its conversation path (call flow, bot, queue, agent, survey) and the turn-by-turn transcript with intents, confidence, slots, AVA tool calls and guardrail events. Card numbers, PINs and sensitive slot values are masked.
+- **Sessions**: sortable, searchable by conversation ID, exportable to CSV. Each session shows its intents in the order they were recognized (looping bots such as Navigator can match several) and its median and longest bot response time. Selecting a session opens its conversation path (call flow, bot, queue, agent, survey) and the turn-by-turn transcript with intents, confidence, slots, AVA tool calls and guardrail events. Card numbers, PINs and sensitive slot values are masked.
 
 The definitions behind each number are at the bottom of the page.
 

@@ -36,6 +36,14 @@
     <label class="field"><span>Virtual agent</span><select id="f-bot"><option value="">All virtual agents</option></select></label>
     <label class="field"><span>Channel</span><select id="f-media"><option value="">All channels</option></select></label>
     <label class="field"><span>Intent</span><select id="f-intent"><option value="">All intents</option></select></label>
+    <label class="field"><span>Intents per session</span>
+      <select id="f-intentcount">
+        <option value="">Any</option>
+        <option value="none">None</option>
+        <option value="one">One</option>
+        <option value="multiple">More than one</option>
+      </select>
+    </label>
     <label class="field"><span>Outcome</span>
       <select id="f-containment">
         <option value="">All outcomes</option>
@@ -120,7 +128,8 @@
         <dt>Contained</dt><dd>The conversation never reached a queue or an agent after the bot session. When Genesys has no conversation detail for a session, a disconnect inside the bot counts as contained and an exit back to the flow counts as escalated.</dd>
         <dt>Reached an agent</dt><dd>An agent connected to the conversation that included the bot session.</dd>
         <dt>Query self-service rate</dt><dd>Customer questions the bot marked as self-served, divided by all questions it handled (Genesys oBotSessionQuerySelfServed / oBotSessionQuery).</dd>
-        <dt>Intent recognized</dt><dd>Sessions where the bot matched at least one intent.</dd>
+        <dt>Intent recognized</dt><dd>Sessions where the bot matched at least one intent, from either turn data or Genesys's session totals.</dd>
+        <dt>Intents in a session</dt><dd>A bot that loops, such as Navigator, can match several intents in one session. Every one is kept: the session counts under each intent it matched, the Intent filter finds a session by any of them, and the session list shows them in the order they were recognized (A → B). Matches counts every recognition, including the same intent matched twice in one session. The order and repeats come from turn-level data, which Genesys keeps for about 10 days; intents that only Genesys's session totals record (such as knowledge matches, or anything older than the turn data) are listed after the ordered ones.</dd>
         <dt>Preview sessions</dt><dd>Sessions started from preview (test) mode in Architect. They have no real conversation, so they are left out by default; the Preview sessions filter can include them or show only them.</dd>
         <dt>Bot response time</dt><dd>For each customer turn, the time from when Genesys captured the customer's input until the bot had its reply ready. The greeting is not counted. Median and longest are taken across every turn in the selection, so they apply per org, per virtual agent or per session depending on the filters. Genesys appears to keep turn-level data for only about the last 10 days, and sessions where the customer never replied have no turn to time, so these figures cover only the sessions that have turn data.</dd>
         <dt>Recognition failure</dt><dd>Sessions with at least one no-match or no-input event.</dd>

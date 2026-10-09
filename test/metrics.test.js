@@ -58,6 +58,27 @@ test('applyFilters hides, includes or isolates preview sessions', () => {
   assert.equal(M.applyFilters(rows, {}).length, 3);
 });
 
+test('looping sessions keep every intent, in order, with repeats', () => {
+  const rows = [
+    session({ intents: ['Balance', 'Knowledge'], intentPath: ['Fraud', 'Balance', 'Fraud'] }),
+    session({ intents: ['Balance'] }),
+    session({}),
+  ];
+  assert.deepEqual(M.intentPath(rows[0]), ['Fraud', 'Balance', 'Fraud', 'Knowledge']);
+  assert.deepEqual(M.intentPath(rows[1]), ['Balance']);
+  assert.equal(M.applyFilters(rows, { intentCount: 'multiple' }).length, 1);
+  assert.equal(M.applyFilters(rows, { intentCount: 'one' }).length, 1);
+  assert.equal(M.applyFilters(rows, { intentCount: 'none' }).length, 1);
+  const table = Object.fromEntries(M.intentTable(rows).map((r) => [r.intent, r]));
+  assert.equal(table.Fraud.sessions, 1);
+  assert.equal(table.Fraud.matches, 2);
+  assert.equal(table.Balance.sessions, 2);
+  const sum = M.summarize(rows);
+  assert.equal(sum.multiIntent, 1);
+  assert.equal(sum.intentsPerSession, 2.5);
+  assert.equal(M.applyFilters(rows, { intent: 'Fraud' }).length, 1);
+});
+
 test('byDay fills empty days in the interval', () => {
   const days = M.byDay([session({ start: '2026-10-02T12:00:00', escalation: 'none' })], '2026-10-01T00:00:00', '2026-10-04T00:00:00');
   assert.deepEqual(days.map((d) => d.day), ['2026-10-01', '2026-10-02', '2026-10-03']);

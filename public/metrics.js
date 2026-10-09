@@ -39,6 +39,25 @@
     return 'unknown';
   }
 
+  // Every intent recognized in a session: the turn-by-turn path first (in order, with repeats),
+  // then any intent Genesys's session aggregates add that the turns don't name. The two sources
+  // don't always agree (the aggregates can miss an intent from a looping bot's earlier pass, and
+  // only they record knowledge matches), so the union is the complete list.
+  function intentPath(s) {
+    const path = s.intentPath || [];
+    return path.concat(s.intents.filter((i) => !path.includes(i)));
+  }
+
+  // Distinct intents in a session, including the final intent.
+  function sessionIntents(s) {
+    return [...new Set(intentPath(s).concat(s.finalIntent ? [s.finalIntent] : []))];
+  }
+
+  function intentCountBucket(s) {
+    const n = intentPath(s).length;
+    return n === 0 ? 'none' : n === 1 ? 'one' : 'multiple';
+  }
+
   function applyFilters(sessions, f = {}) {
     const bots = f.botIds && f.botIds.length ? new Set(f.botIds) : null;
     const q = (f.search || '').trim().toLowerCase();
@@ -47,8 +66,9 @@
       if (f.preview === 'only' && !s.preview) return false;
       if (bots && !bots.has(s.botId)) return false;
       if (f.media && s.media !== f.media) return false;
-      if (f.intent && !(s.intents.includes(f.intent) || s.finalIntent === f.intent)) return false;
+      if (f.intent && !sessionIntents(s).includes(f.intent)) return false;
       if (f.containment && containment(s) !== f.containment) return false;
+      if (f.intentCount && intentCountBucket(s) !== f.intentCount) return false;
       if (f.botResult && (s.botResult || '') !== f.botResult) return false;
       if (f.recognitionFailure === 'yes' && !s.recognitionFailures) return false;
       if (f.recognitionFailure === 'no' && s.recognitionFailures) return false;
@@ -87,7 +107,7 @@
 
   function summarize(sessions) {
     let contained = 0, escalated = 0, unknown = 0, reachedAgent = 0, inferred = 0;
-    let queries = 0, served = 0, withFailure = 0, withIntent = 0;
+    let queries = 0, served = 0, withFailure = 0, withIntent = 0, multiIntent = 0, intentMatches = 0;
     for (const s of sessions) {
       const c = containment(s);
       if (c === 'contained') contained++;
@@ -98,7 +118,10 @@
       queries += s.queries || 0;
       served += s.selfServedQueries || 0;
       if (s.recognitionFailures) withFailure++;
-      if (s.intents.length) withIntent++;
+      const n = intentPath(s).length;
+      if (n) withIntent++;
+      intentMatches += n;
+      if (n > 1) multiIntent++;
     }
     const known = contained + escalated;
     return {
@@ -114,6 +137,9 @@
       selfServiceRate: ratio(served, queries),
       queries,
       intentRate: ratio(withIntent, sessions.length),
+      withIntent,
+      multiIntent,
+      intentsPerSession: ratio(intentMatches, withIntent),
       recognitionFailureRate: ratio(withFailure, sessions.length),
       avgTurns: mean(sessions.map((s) => s.turns)),
       // Median, because messaging sessions can stay open for days and swamp an average.
@@ -179,8 +205,13 @@
     const total = sessions.length;
     return groupTable(
       sessions,
-      (s) => [...new Set(s.intents.concat(s.finalIntent ? [s.finalIntent] : []))],
-      (key, rows) => ({ intent: key, share: ratio(rows.length, total), asFinal: rows.filter((r) => r.finalIntent === key).length })
+      sessionIntents,
+      (key, rows) => ({
+        intent: key,
+        share: ratio(rows.length, total),
+        asFinal: rows.filter((r) => r.finalIntent === key).length,
+        matches: rows.reduce((a, r) => a + intentPath(r).filter((i) => i === key).length, 0),
+      })
     );
   }
 
@@ -199,8 +230,7 @@
     const media = new Set();
     for (const s of sessions) {
       bots.set(s.botId, s.botName);
-      s.intents.forEach((i) => intents.add(i));
-      if (s.finalIntent) intents.add(s.finalIntent);
+      sessionIntents(s).forEach((i) => intents.add(i));
       if (s.botResult) results.add(s.botResult);
       if (s.media) media.add(s.media);
     }
@@ -236,7 +266,7 @@
     };
   }
 
-  const api = { verificationTotals, containment, applyFilters, summarize, byDay, byResult, byFailureReason, intentTable, botTable, options, resultLabel, failureLabel, localDay, median, responseStats, sessionResponse };
+  const api = { intentPath, intentCountBucket, verificationTotals, containment, applyFilters, summarize, byDay, byResult, byFailureReason, intentTable, botTable, options, resultLabel, failureLabel, localDay, median, responseStats, sessionResponse };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);
