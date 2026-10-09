@@ -250,12 +250,22 @@ table.data .empty td { cursor: default; color: var(--muted); text-align: center;
 .esc-note p + p { margin-top: 6px; }
 
 /* Escalation reasons pie */
-.pie-wrap { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
-.pie { width: 200px; height: 200px; flex: none; }
+/* The reasons card stretches to its neighbour's height; the pie grows to fill it. */
+.esc-reasons { display: flex; flex-direction: column; }
+.esc-reasons #esc-categories { flex: 1; display: flex; }
+.pie-wrap { flex: 1; display: flex; align-items: center; gap: 32px; flex-wrap: wrap; }
+.pie { flex: 1 1 260px; max-width: 460px; width: 100%; height: auto; aspect-ratio: 1; }
+.esc-reasons #esc-categories { container-type: inline-size; }
+/* In a narrow card, put the legend under a full-width pie instead of squeezing both side by side. */
+@container (max-width: 560px) {
+  .pie-wrap { flex-direction: column; align-items: stretch; justify-content: center; }
+  .pie { flex: none; max-width: 100%; margin: 0 auto; }
+  .pie-legend { flex: none; }
+}
 .pie path { stroke: var(--surface); stroke-width: 1.5; cursor: pointer; transition: opacity 0.15s; }
 .pie path.dim, .pie-legend li.dim { opacity: 0.35; }
 .pie path:focus-visible { outline: none; stroke: var(--text); stroke-width: 2; }
-.pie-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; flex: 1 1 220px; min-width: 0; }
+.pie-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; flex: 1 1 220px; min-width: 0; font-size: 15px; }
 .pie-legend li { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 3px 6px; margin: 0 -6px; border-radius: 6px; cursor: pointer; }
 .pie-legend li:hover, .pie-legend li.active { background: var(--surface-2); }
 .pie-legend .swatch { width: 12px; height: 12px; border-radius: 3px; }
