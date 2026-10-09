@@ -67,6 +67,8 @@ test('turnResponseMs measures from captured input to bot reply and skips the gre
   const { turnResponseMs } = require('../server/detail');
   assert.equal(turnResponseMs({ dateInputStarted: '2026-10-09T14:37:19.669Z', dateCreated: '2026-10-09T14:37:23.515Z', dateCompleted: '2026-10-09T14:37:26.299Z' }), 2784);
   assert.equal(turnResponseMs({ dateCreated: '2026-10-09T14:36:38.837Z', dateCompleted: '2026-10-09T14:36:41.002Z' }), null);
+  // Messaging turns have no dateInputStarted, only the customer's text.
+  assert.equal(turnResponseMs({ userInput: 'Yes', dateCreated: '2026-10-09T03:28:50.067Z', dateCompleted: '2026-10-09T03:28:50.248Z' }), 181);
 });
 
 test('readOrgConfigs reads named orgs from GENESYS_ORGS', () => {

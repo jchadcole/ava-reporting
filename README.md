@@ -36,7 +36,7 @@ The browser receives the session rows for the selected date range once and compu
 
 Containment uses conversation detail: a session is **contained** when the conversation never reached a queue or an agent. Conversation detail is capped (5,000 conversations by default); beyond that, a disconnect inside the bot counts as contained and an exit back to the flow counts as escalated, and the dashboard says how many sessions were estimated.
 
-Bot response time is measured per customer turn, from when Genesys captured the customer's input (`dateCreated`) to when the bot had its reply ready (`dateCompleted`). Genesys keeps turn-level data for only some sessions, so the dashboard says how many sessions the figures cover.
+Bot response time is measured per customer turn, from when Genesys captured the customer's input (`dateCreated`) to when the bot had its reply ready (`dateCompleted`). In testing, Genesys returned turn-level data for only about the last 10 days, and sessions where the customer never replied have no turn to time, so the dashboard says how many sessions the figures cover.
 
 ## Running it
 

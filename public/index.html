@@ -113,7 +113,7 @@
         <dt>Reached an agent</dt><dd>An agent connected to the conversation that included the bot session.</dd>
         <dt>Query self-service rate</dt><dd>Customer questions the bot marked as self-served, divided by all questions it handled (Genesys oBotSessionQuerySelfServed / oBotSessionQuery).</dd>
         <dt>Intent recognized</dt><dd>Sessions where the bot matched at least one intent.</dd>
-        <dt>Bot response time</dt><dd>For each customer turn, the time from when Genesys captured the customer's input until the bot had its reply ready. The greeting is not counted. Median and longest are taken across every turn in the selection, so they apply per org, per virtual agent or per session depending on the filters. Genesys keeps turn-level timing for only some sessions, so these figures cover the sessions that have it.</dd>
+        <dt>Bot response time</dt><dd>For each customer turn, the time from when Genesys captured the customer's input until the bot had its reply ready. The greeting is not counted. Median and longest are taken across every turn in the selection, so they apply per org, per virtual agent or per session depending on the filters. Genesys appears to keep turn-level data for only about the last 10 days, and sessions where the customer never replied have no turn to time, so these figures cover only the sessions that have turn data.</dd>
         <dt>Recognition failure</dt><dd>Sessions with at least one no-match or no-input event.</dd>
       </dl>
     </section>

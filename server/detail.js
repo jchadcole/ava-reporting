@@ -73,9 +73,10 @@ function summarizeParticipant(p) {
 
 // Bot response time for a customer turn: from the moment the customer's input was
 // captured (dateCreated) until the bot finished processing it and had its reply ready
-// (dateCompleted). The greeting turn has no customer input and is skipped.
+// (dateCompleted). Voice turns mark customer input with dateInputStarted; messaging
+// turns only carry the userInput text. The greeting turn has neither and is skipped.
 function turnResponseMs(t) {
-  if (!t.dateInputStarted || !t.dateCreated || !t.dateCompleted) return null;
+  if (!(t.dateInputStarted || t.userInput) || !t.dateCreated || !t.dateCompleted) return null;
   const ms = Date.parse(t.dateCompleted) - Date.parse(t.dateCreated);
   return Number.isFinite(ms) && ms >= 0 ? ms : null;
 }
