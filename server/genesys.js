@@ -18,7 +18,12 @@ function createClient({ clientId, clientSecret, region = 'mypurecloud.com' }) {
       },
       body: 'grant_type=client_credentials',
     });
-    if (!res.ok) throw new Error(`Genesys login failed for ${region}: ${res.status}`);
+    if (!res.ok) {
+      // Genesys explains login failures (wrong secret, wrong grant type, unknown client) in the body.
+      const detail = await res.json().catch(() => ({}));
+      const reason = detail.error_description || detail.description || detail.error || '';
+      throw new Error(`Genesys login failed for ${region} (${res.status}${reason ? `: ${reason}` : ''}). Check this org's client ID, secret and region, and that the OAuth client uses the Client Credentials grant.`);
+    }
     const body = await res.json();
     cachedToken = { value: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
     return cachedToken.value;

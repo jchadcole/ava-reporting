@@ -125,8 +125,13 @@
       const endShown = new Date(new Date(iv.end).getTime() - 1);
       $('subtitle').textContent = `${new Date(iv.start).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })} – ${endShown.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}${SNAPSHOT ? ' · snapshot' : ''}`;
       populateOptions();
+      main.hidden = false;
       render();
     } catch (err) {
+      // Don't leave the previous org's or range's numbers on screen under the new selection.
+      state.dataset = null;
+      main.hidden = true;
+      $('updated').textContent = '';
       showBanner(`Couldn’t load data: ${err.message}`, true);
     } finally {
       main.classList.remove('loading');
