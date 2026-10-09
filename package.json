@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node server/index.js",
+    "start": "node --env-file=.env server/index.js",
     "test": "node --test",
     "snapshot": "node scripts/snapshot.js"
   },

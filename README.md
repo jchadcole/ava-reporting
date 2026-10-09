@@ -52,7 +52,7 @@ Requires Node 20 or later.
 ```sh
 npm install            # the Anthropic SDK, used for the Escalations tab
 cp .env.example .env   # fill in the Genesys OAuth client
-node --env-file=.env server/index.js   # http://127.0.0.1:3000
+npm start              # same as: node --env-file=.env server/index.js → http://127.0.0.1:3000
 ```
 
 The OAuth client needs read access to analytics (conversation details, bot aggregates and bot reporting turns), flows and users.
