@@ -519,6 +519,7 @@
       $('f-range').disabled = true;
       $('f-range').innerHTML = '<option>Snapshot range</option>';
       $('refresh').hidden = true;
+      $('export').hidden = true; // a static snapshot can't always start downloads
     }
 
     $('f-range').addEventListener('change', (e) => {
