@@ -15,8 +15,8 @@ async function main() {
   const detailCount = Number(process.argv[3] ?? 60);
   const end = new Date();
   const start = new Date(end.getTime() - days * 86_400_000);
-  // Snapshot the org named by SNAPSHOT_ORG (default, org1, org2, ...) or the first one configured.
-  const org = getOrg(process.env.SNAPSHOT_ORG);
+  // Snapshot the org named by SNAPSHOT_ORG (a name from GENESYS_ORGS) or the first one configured.
+  const org = getOrg(process.env.SNAPSHOT_ORG && process.env.SNAPSHOT_ORG.toLowerCase().replace(/[^a-z0-9]+/g, '_'));
   const orgLabel = (await listOrgs()).find((o) => o.key === org.key)?.label || org.key;
   const dataset = await buildDataset(org.client, start.toISOString(), end.toISOString());
   dataset.org = { key: org.key, label: orgLabel };

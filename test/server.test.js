@@ -69,12 +69,18 @@ test('turnResponseMs measures from captured input to bot reply and skips the gre
   assert.equal(turnResponseMs({ dateCreated: '2026-10-09T14:36:38.837Z', dateCompleted: '2026-10-09T14:36:41.002Z' }), null);
 });
 
-test('readOrgConfigs reads the default org and numbered extra orgs', () => {
+test('readOrgConfigs reads named orgs from GENESYS_ORGS', () => {
   const { readOrgConfigs } = require('../server/orgs');
   const configs = readOrgConfigs({
-    GENESYS_CLIENT_ID: 'a', GENESYS_CLIENT_SECRET: 'b', GENESYS_REGION: 'mypurecloud.com',
-    GENESYS_ORG_2_CLIENT_ID: 'c', GENESYS_ORG_2_CLIENT_SECRET: 'd', GENESYS_ORG_2_REGION: 'usw2.pure.cloud', GENESYS_ORG_2_LABEL: 'Acme',
-    GENESYS_ORG_3_CLIENT_ID: 'e', // no secret: ignored
+    GENESYS_ORGS: 'SC12, Acme Health',
+    GENESYS_SC12_CLIENT_ID: 'a', GENESYS_SC12_CLIENT_SECRET: 'b',
+    GENESYS_ACME_HEALTH_CLIENT_ID: 'c', GENESYS_ACME_HEALTH_CLIENT_SECRET: 'd', GENESYS_ACME_HEALTH_REGION: 'usw2.pure.cloud',
   });
-  assert.deepEqual(configs.map((c) => [c.key, c.region, c.label]), [['default', 'mypurecloud.com', null], ['org2', 'usw2.pure.cloud', 'Acme']]);
+  assert.deepEqual(configs.map((c) => [c.key, c.label, c.region, c.missing]), [['sc12', 'SC12', 'mypurecloud.com', false], ['acme_health', 'Acme Health', 'usw2.pure.cloud', false]]);
+});
+
+test('readOrgConfigs falls back to the single-org variables', () => {
+  const { readOrgConfigs } = require('../server/orgs');
+  assert.deepEqual(readOrgConfigs({ GENESYS_CLIENT_ID: 'a', GENESYS_CLIENT_SECRET: 'b' }).map((c) => [c.key, c.region]), [['default', 'mypurecloud.com']]);
+  assert.equal(readOrgConfigs({}).length, 0);
 });

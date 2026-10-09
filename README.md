@@ -51,7 +51,8 @@ The OAuth client needs read access to analytics (conversation details, bot aggre
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GENESYS_CLIENT_ID`, `GENESYS_CLIENT_SECRET` | – | Client credentials grant |
+| `GENESYS_ORGS` and `GENESYS_<NAME>_*` | – | Orgs for the org picker (see [Several orgs](#several-orgs)) |
+| `GENESYS_CLIENT_ID`, `GENESYS_CLIENT_SECRET` | – | Single-org client credentials |
 | `GENESYS_REGION` | `mypurecloud.com` | Region domain, such as `usw2.pure.cloud` |
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Where the server listens |
 | `DASHBOARD_USER`, `DASHBOARD_PASSWORD` | unset | Turn on HTTP basic auth. Set these, or put the app behind SSO, before exposing it beyond your machine. |
@@ -64,16 +65,22 @@ The OAuth client needs read access to analytics (conversation details, bot aggre
 
 ## Several orgs
 
-The default org comes from `GENESYS_CLIENT_ID`, `GENESYS_CLIENT_SECRET` and `GENESYS_REGION`. To add another, create an OAuth client (client credentials grant) in that org with the same read permissions, then add a numbered block to `.env` and restart the server:
+List the orgs in `GENESYS_ORGS`, then give each name its own OAuth client (client credentials grant, same read permissions) in `.env`, and restart the server:
 
 ```sh
-GENESYS_ORG_1_LABEL=Customer A          # optional; otherwise the org's name is read from Genesys
-GENESYS_ORG_1_CLIENT_ID=...
-GENESYS_ORG_1_CLIENT_SECRET=...
-GENESYS_ORG_1_REGION=usw2.pure.cloud
+GENESYS_ORGS=SC12,Acme
+
+GENESYS_SC12_CLIENT_ID=...
+GENESYS_SC12_CLIENT_SECRET=...
+GENESYS_SC12_REGION=mypurecloud.com
+
+GENESYS_ACME_CLIENT_ID=...
+GENESYS_ACME_CLIENT_SECRET=...
+GENESYS_ACME_REGION=usw2.pure.cloud
+GENESYS_ACME_LABEL=Acme Health   # optional longer name for the picker
 ```
 
-Use `GENESYS_ORG_2_…`, `GENESYS_ORG_3_…` for more. The org picker lists each org by name; credentials never reach the browser. `SNAPSHOT_ORG=org1 npm run snapshot` snapshots a specific org.
+Variable names use the org name in uppercase, with spaces and other symbols turned into `_`. The org picker shows the names in the order listed; credentials never reach the browser. With `GENESYS_ORGS` unset, the single-org `GENESYS_CLIENT_ID`, `GENESYS_CLIENT_SECRET` and `GENESYS_REGION` are used. `SNAPSHOT_ORG=acme npm run snapshot` snapshots a specific org.
 
 ## Static snapshot
 

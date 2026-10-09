@@ -544,7 +544,7 @@
       state.orgs = [];
     }
     if (!state.orgs.some((o) => o.key === state.org)) state.org = state.orgs[0]?.key || '';
-    sel.innerHTML = state.orgs.map((o) => `<option value="${esc(o.key)}">${esc(o.label)}${o.error ? ' (sign-in failed)' : ''}</option>`).join('');
+    sel.innerHTML = state.orgs.map((o) => `<option value="${esc(o.key)}">${esc(o.label)}${o.error ? ` (${esc(o.error.toLowerCase())})` : ''}</option>`).join('');
     sel.value = state.org;
     sel.disabled = state.orgs.length < 2;
   }
