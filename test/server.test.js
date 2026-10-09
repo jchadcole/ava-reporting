@@ -62,3 +62,19 @@ test('displayBotName tidies third-party bot ids', () => {
   assert.equal(displayBotName('agent_operator?instance_name=x', 'agent_operator?instance_name=x'), 'agent_operator (third-party)');
   assert.equal(displayBotName('b1', 'Billing bot'), 'Billing bot');
 });
+
+test('turnResponseMs measures from captured input to bot reply and skips the greeting', () => {
+  const { turnResponseMs } = require('../server/detail');
+  assert.equal(turnResponseMs({ dateInputStarted: '2026-10-09T14:37:19.669Z', dateCreated: '2026-10-09T14:37:23.515Z', dateCompleted: '2026-10-09T14:37:26.299Z' }), 2784);
+  assert.equal(turnResponseMs({ dateCreated: '2026-10-09T14:36:38.837Z', dateCompleted: '2026-10-09T14:36:41.002Z' }), null);
+});
+
+test('readOrgConfigs reads the default org and numbered extra orgs', () => {
+  const { readOrgConfigs } = require('../server/orgs');
+  const configs = readOrgConfigs({
+    GENESYS_CLIENT_ID: 'a', GENESYS_CLIENT_SECRET: 'b', GENESYS_REGION: 'mypurecloud.com',
+    GENESYS_ORG_2_CLIENT_ID: 'c', GENESYS_ORG_2_CLIENT_SECRET: 'd', GENESYS_ORG_2_REGION: 'usw2.pure.cloud', GENESYS_ORG_2_LABEL: 'Acme',
+    GENESYS_ORG_3_CLIENT_ID: 'e', // no secret: ignored
+  });
+  assert.deepEqual(configs.map((c) => [c.key, c.region, c.label]), [['default', 'mypurecloud.com', null], ['org2', 'usw2.pure.cloud', 'Acme']]);
+});

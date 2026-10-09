@@ -8,6 +8,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { buildDataset } = require('./dataset');
 const { getSessionDetail } = require('./detail');
+const { getOrg, listOrgs } = require('./orgs');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -49,6 +50,9 @@ function authorized(req) {
 
 async function handleApi(req, res, url) {
   if (url.pathname === '/api/health') return sendJson(res, 200, { ok: true });
+  if (url.pathname === '/api/orgs') return sendJson(res, 200, { orgs: await cached('orgs', listOrgs) });
+
+  const org = getOrg(url.searchParams.get('org'));
 
   if (url.pathname === '/api/dataset') {
     const start = url.searchParams.get('start');
@@ -57,8 +61,8 @@ async function handleApi(req, res, url) {
     const endMs = Date.parse(end);
     if (Number.isNaN(startMs) || Number.isNaN(endMs) || startMs >= endMs) return sendJson(res, 400, { error: 'start and end must be ISO timestamps with start before end' });
     if (endMs - startMs > MAX_RANGE_DAYS * 86_400_000) return sendJson(res, 400, { error: `Date range is limited to ${MAX_RANGE_DAYS} days` });
-    const key = `dataset:${new Date(startMs).toISOString()}:${new Date(endMs).toISOString()}`;
-    return sendJson(res, 200, await cached(key, () => buildDataset(start, end)));
+    const key = `dataset:${org.key}:${new Date(startMs).toISOString()}:${new Date(endMs).toISOString()}`;
+    return sendJson(res, 200, await cached(key, () => buildDataset(org.client, start, end)));
   }
 
   if (url.pathname === '/api/session') {
@@ -69,8 +73,8 @@ async function handleApi(req, res, url) {
       params[name] = value;
     }
     if (!params.conversationId && !params.sessionId) return sendJson(res, 400, { error: 'conversationId or sessionId is required' });
-    const key = `session:${params.conversationId}:${params.botId}:${params.sessionId}`;
-    return sendJson(res, 200, await cached(key, () => getSessionDetail(params)));
+    const key = `session:${org.key}:${params.conversationId}:${params.botId}:${params.sessionId}`;
+    return sendJson(res, 200, await cached(key, () => getSessionDetail(org.client, params)));
   }
 
   return sendJson(res, 404, { error: 'Not found' });

@@ -8,19 +8,24 @@ const path = require('node:path');
 const { buildDataset } = require('../server/dataset');
 const { getSessionDetail } = require('../server/detail');
 const { mapLimit } = require('../server/genesys');
+const { getOrg, listOrgs } = require('../server/orgs');
 
 async function main() {
   const days = Number(process.argv[2]) || 30;
   const detailCount = Number(process.argv[3] ?? 60);
   const end = new Date();
   const start = new Date(end.getTime() - days * 86_400_000);
-  const dataset = await buildDataset(start.toISOString(), end.toISOString());
+  // Snapshot the org named by SNAPSHOT_ORG (default, org1, org2, ...) or the first one configured.
+  const org = getOrg(process.env.SNAPSHOT_ORG);
+  const orgLabel = (await listOrgs()).find((o) => o.key === org.key)?.label || org.key;
+  const dataset = await buildDataset(org.client, start.toISOString(), end.toISOString());
+  dataset.org = { key: org.key, label: orgLabel };
 
   // Prefer sessions with a transcript-worthy story: most recent first, with turns.
   const picks = dataset.sessions.filter((s) => s.turns > 1 && s.conversationId).slice(0, detailCount);
   const details = {};
   await mapLimit(picks, 4, async (s) => {
-    details[s.id] = await getSessionDetail({ conversationId: s.conversationId, botId: s.botId, sessionId: s.id });
+    details[s.id] = await getSessionDetail(org.client, { conversationId: s.conversationId, botId: s.botId, sessionId: s.id });
   });
 
   const pub = path.join(__dirname, '..', 'public');

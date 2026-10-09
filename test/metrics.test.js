@@ -65,3 +65,14 @@ test('intentTable counts each session once per intent', () => {
   assert.equal(billing.containmentRate, 0.5);
   assert.equal(t.find((r) => r.intent === 'Hours').share, 0.5);
 });
+
+test('response stats pool every customer turn across sessions', () => {
+  const rows = [session({ responseTimesMs: [400, 1200] }), session({ responseTimesMs: [800, 5000, 600] }), session({ responseTimesMs: [] })];
+  const s = M.summarize(rows);
+  assert.equal(s.responseTurns, 5);
+  assert.equal(s.medianResponseMs, 800);
+  assert.equal(s.maxResponseMs, 5000);
+  assert.deepEqual(M.sessionResponse(rows[0]), { responseTurns: 2, timedSessions: 1, medianResponseMs: 800, maxResponseMs: 1200 });
+  assert.equal(M.sessionResponse(rows[2]).maxResponseMs, null);
+  assert.equal(M.botTable(rows.map((r) => ({ ...r, botId: 'b', botName: 'B' })))[0].maxResponseMs, 5000);
+});

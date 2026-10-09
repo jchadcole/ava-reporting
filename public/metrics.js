@@ -67,6 +67,22 @@
     return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
   };
 
+  // Bot response times are per customer turn; org- and bot-level figures pool every
+  // turn rather than averaging per-session values, so a long session weighs more.
+  function responseStats(sessions) {
+    const times = [];
+    let timedSessions = 0;
+    for (const s of sessions) {
+      if (s.responseTimesMs?.length) timedSessions++;
+      for (const ms of s.responseTimesMs || []) times.push(ms);
+    }
+    return { responseTurns: times.length, timedSessions, medianResponseMs: median(times), maxResponseMs: times.length ? times.reduce((a, b) => (b > a ? b : a)) : null };
+  }
+
+  function sessionResponse(s) {
+    return responseStats([s]);
+  }
+
   function summarize(sessions) {
     let contained = 0, escalated = 0, unknown = 0, reachedAgent = 0, inferred = 0;
     let queries = 0, served = 0, withFailure = 0, withIntent = 0;
@@ -100,6 +116,7 @@
       avgTurns: mean(sessions.map((s) => s.turns)),
       // Median, because messaging sessions can stay open for days and swamp an average.
       medianDurationMs: median(sessions.map((s) => s.durationMs)),
+      ...responseStats(sessions),
     };
   }
 
@@ -194,7 +211,7 @@
     };
   }
 
-  const api = { containment, applyFilters, summarize, byDay, byResult, byFailureReason, intentTable, botTable, options, resultLabel, failureLabel, localDay, median };
+  const api = { containment, applyFilters, summarize, byDay, byResult, byFailureReason, intentTable, botTable, options, resultLabel, failureLabel, localDay, median, responseStats, sessionResponse };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);

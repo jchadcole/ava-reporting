@@ -3,7 +3,8 @@
 // session list are computed from these rows in the browser (public/metrics.js), so
 // filters apply to the KPIs, charts and list consistently.
 
-const { request } = require('./genesys');
+const { mapLimit } = require('./genesys');
+const { turnResponseMs } = require('./detail');
 
 const BOT_AGG = '/api/v2/analytics/bots/aggregates/query';
 const DETAILS = '/api/v2/analytics/conversations/details/query';
@@ -11,6 +12,8 @@ const DAY_MS = 86_400_000;
 const DETAILS_WINDOW_MS = 30 * DAY_MS; // details queries are limited to ~31 days per call
 const DETAILS_PAGE_SIZE = 100;
 const MAX_DETAIL_CONVERSATIONS = Number(process.env.MAX_DETAIL_CONVERSATIONS) || 5000;
+const TURN_PAGE_SIZE = 250;
+const MAX_TURN_PAGES_PER_BOT = Number(process.env.MAX_TURN_PAGES_PER_BOT) || 40;
 
 const MEDIA_LABEL = { CALL: 'Voice', MESSAGING: 'Messaging' };
 // Survey "bots" are not virtual agents, so they are left out unless configured otherwise.
@@ -22,7 +25,7 @@ function displayBotName(id, name) {
   return id && id.includes('?') ? `${id.split('?')[0]} (third-party)` : id;
 }
 
-function botAgg(interval, groupBy, metrics, extra = {}) {
+function botAgg(request, interval, groupBy, metrics, extra = {}) {
   return request(BOT_AGG, { interval, groupBy, metrics, ...extra });
 }
 
@@ -149,7 +152,7 @@ function summarizeConversation(c) {
   };
 }
 
-async function fetchConversationSummaries(startMs, endMs) {
+async function fetchConversationSummaries(request, startMs, endMs) {
   const out = new Map();
   let truncated = false;
   for (let ws = startMs; ws < endMs && !truncated; ws += DETAILS_WINDOW_MS) {
@@ -208,7 +211,39 @@ function attachConversations(sessions, conversations) {
   return sessions;
 }
 
-async function buildDataset(startIso, endIso) {
+// Bot response time per customer turn, keyed by bot session id. Reporting turns are
+// only available per bot, so each bot with sessions in the interval is paged through.
+async function fetchResponseTimes(request, botIds, interval) {
+  const bySession = new Map();
+  let truncated = false;
+  await mapLimit(botIds, 4, async (botId) => {
+    let path = `/api/v2/analytics/botflows/${encodeURIComponent(botId)}/reportingturns?pageSize=${TURN_PAGE_SIZE}&interval=${encodeURIComponent(interval)}`;
+    let pages = 0;
+    while (path) {
+      if (pages++ >= MAX_TURN_PAGES_PER_BOT) {
+        truncated = true;
+        break;
+      }
+      let res;
+      try {
+        res = await request(path);
+      } catch {
+        break; // some bot types (third-party, some digital bots) don't report turns
+      }
+      for (const t of res.entities || []) {
+        const ms = turnResponseMs(t);
+        if (ms == null || !t.sessionId) continue;
+        if (!bySession.has(t.sessionId)) bySession.set(t.sessionId, []);
+        bySession.get(t.sessionId).push(ms);
+      }
+      path = res.nextUri || null;
+    }
+  });
+  return { bySession, truncated };
+}
+
+async function buildDataset(client, startIso, endIso) {
+  const { request } = client;
   const startMs = Date.parse(startIso);
   const endMs = Date.parse(endIso);
   if (!(startMs < endMs)) throw Object.assign(new Error('start must be before end'), { status: 400 });
@@ -217,17 +252,18 @@ async function buildDataset(startIso, endIso) {
   const granularity = endMs - startMs > DAY_MS ? 'P1D' : undefined;
 
   const [names, core, intents, failures, finals, details] = await Promise.all([
-    botAgg(interval, ['botId', 'botName', 'botFlowType'], ['nBotSessions']),
+    botAgg(request, interval, ['botId', 'botName', 'botFlowType'], ['nBotSessions']),
     botAgg(
+      request,
       interval,
       ['botSessionId', 'botId', 'conversationId', 'botResult'],
       ['nBotSessions', 'nBotSessionTurns', 'tBotSession', 'tBotExit', 'tBotDisconnect', 'oBotSessionQuery', 'oBotSessionQuerySelfServed'],
       granularity ? { granularity } : {}
     ),
-    botAgg(interval, ['botSessionId', 'botIntent'], ['oBotIntent']),
-    botAgg(interval, ['botSessionId', 'botRecognitionFailureReason'], ['tBotRecognitionFailure']),
-    botAgg(interval, ['botSessionId', 'botFinalIntent'], ['tBotExit', 'tBotDisconnect']),
-    fetchConversationSummaries(startMs, endMs),
+    botAgg(request, interval, ['botSessionId', 'botIntent'], ['oBotIntent']),
+    botAgg(request, interval, ['botSessionId', 'botRecognitionFailureReason'], ['tBotRecognitionFailure']),
+    botAgg(request, interval, ['botSessionId', 'botFinalIntent'], ['tBotExit', 'tBotDisconnect']),
+    fetchConversationSummaries(request, startMs, endMs),
   ]);
 
   const botNames = new Map();
@@ -239,6 +275,9 @@ async function buildDataset(startIso, endIso) {
     merged.filter((s) => !EXCLUDED_BOT_TYPES.has(s.botType)),
     details.conversations
   );
+  const botIds = [...new Set(sessions.map((s) => s.botId).filter((id) => id && !id.includes('?')))];
+  const responses = await fetchResponseTimes(request, botIds, interval);
+  for (const s of sessions) s.responseTimesMs = responses.bySession.get(s.id) || [];
   sessions.sort((a, b) => (b.start || '').localeCompare(a.start || ''));
 
   return {
@@ -248,6 +287,7 @@ async function buildDataset(startIso, endIso) {
     meta: {
       conversationsWithDetails: details.conversations.size,
       detailsTruncated: details.truncated,
+      responseTimesTruncated: responses.truncated,
     },
   };
 }

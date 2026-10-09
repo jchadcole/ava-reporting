@@ -2,7 +2,6 @@
 // Drill-down for one bot session: the conversation journey (which flows, queues and
 // agents it passed through) and the turn-by-turn bot transcript.
 
-const { request } = require('./genesys');
 
 const MASK = process.env.MASK_SENSITIVE !== 'false';
 const SENSITIVE_SLOT = /card|cvv|cvc|security|ssn|social|pin|password|account|routing|dob|birth/i;
@@ -36,7 +35,7 @@ const PURPOSE_LABEL = {
 };
 
 const userNames = new Map(); // userId -> Promise<name|null>
-function agentName(userId) {
+function agentName(request, userId) {
   if (!userId) return Promise.resolve(null);
   if (!userNames.has(userId)) {
     userNames.set(userId, request(`/api/v2/users/${encodeURIComponent(userId)}`).then((u) => u.name || null, () => null));
@@ -72,9 +71,19 @@ function summarizeParticipant(p) {
   };
 }
 
+// Bot response time for a customer turn: from the moment the customer's input was
+// captured (dateCreated) until the bot finished processing it and had its reply ready
+// (dateCompleted). The greeting turn has no customer input and is skipped.
+function turnResponseMs(t) {
+  if (!t.dateInputStarted || !t.dateCreated || !t.dateCompleted) return null;
+  const ms = Date.parse(t.dateCompleted) - Date.parse(t.dateCreated);
+  return Number.isFinite(ms) && ms >= 0 ? ms : null;
+}
+
 function summarizeTurn(t) {
   return {
     time: t.dateCreated,
+    responseMs: turnResponseMs(t),
     userInput: maskText(t.userInput || ''),
     botPrompts: t.botPrompts || [],
     action: t.askAction ? { name: t.askAction.actionName, type: t.askAction.actionType } : null,
@@ -88,7 +97,7 @@ function summarizeTurn(t) {
   };
 }
 
-async function fetchTurns(botId, sessionId) {
+async function fetchTurns(request, botId, sessionId) {
   const turns = [];
   let path = `/api/v2/analytics/botflows/${encodeURIComponent(botId)}/reportingturns?pageSize=100&sessionId=${encodeURIComponent(sessionId)}`;
   for (let i = 0; path && i < 20; i++) {
@@ -100,13 +109,14 @@ async function fetchTurns(botId, sessionId) {
   return turns.map(summarizeTurn);
 }
 
-async function getSessionDetail({ conversationId, botId, sessionId }) {
+async function getSessionDetail(client, { conversationId, botId, sessionId }) {
+  const { request } = client;
   const [conversation, turns] = await Promise.all([
     conversationId ? request(`/api/v2/analytics/conversations/${encodeURIComponent(conversationId)}/details`).catch(() => null) : null,
-    botId && sessionId ? fetchTurns(botId, sessionId).catch(() => []) : [],
+    botId && sessionId ? fetchTurns(request, botId, sessionId).catch(() => []) : [],
   ]);
   const participants = conversation?.participants || [];
-  const names = await Promise.all(participants.map((p) => (p.purpose === 'agent' ? agentName(p.userId) : null)));
+  const names = await Promise.all(participants.map((p) => (p.purpose === 'agent' ? agentName(request, p.userId) : null)));
   const journey = participants
     .map((p, i) => ({ ...summarizeParticipant(p), ...(names[i] ? { name: names[i] } : {}) }))
     .sort((a, b) => (a.start || '').localeCompare(b.start || ''));
@@ -120,4 +130,4 @@ async function getSessionDetail({ conversationId, botId, sessionId }) {
   };
 }
 
-module.exports = { getSessionDetail, maskText, summarizeTurn, summarizeParticipant };
+module.exports = { getSessionDetail, turnResponseMs, maskText, summarizeTurn, summarizeParticipant };

@@ -13,6 +13,7 @@
   const num = (v, digits = 0) => (v == null ? '–' : v.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits }));
   const fmtDateTime = (iso) => (iso ? new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '–');
   const fmtTime = (iso) => (iso ? new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '');
+  const fmtMs = (ms) => (ms == null ? '–' : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`);
   function fmtDuration(ms) {
     if (ms == null) return '–';
     const s = Math.round(ms / 1000);
@@ -27,6 +28,8 @@
   const FILTER_IDS = { bot: 'f-bot', media: 'f-media', intent: 'f-intent', containment: 'f-containment', result: 'f-result', failure: 'f-failure' };
 
   const state = {
+    org: '',
+    orgs: [],
     range: '30',
     from: null,
     to: null,
@@ -65,6 +68,7 @@
   // ---------- URL state, so a filtered view can be bookmarked or shared ----------
   function readHash() {
     const p = new URLSearchParams(location.hash.slice(1));
+    if (p.get('org')) state.org = p.get('org');
     if (p.get('range')) state.range = p.get('range');
     if (p.get('from')) state.from = p.get('from');
     if (p.get('to')) state.to = p.get('to');
@@ -73,6 +77,7 @@
   function writeHash() {
     const p = new URLSearchParams();
     if (!SNAPSHOT) {
+      if (state.org) p.set('org', state.org);
       p.set('range', state.range);
       if (state.range === 'custom') {
         if (state.from) p.set('from', state.from);
@@ -106,7 +111,9 @@
         state.dataset = SNAPSHOT.dataset;
       } else {
         const { start, end } = currentInterval();
-        const res = await fetch(`api/dataset?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+        const qs = new URLSearchParams({ start, end });
+        if (state.org) qs.set('org', state.org);
+        const res = await fetch(`api/dataset?${qs}`);
         const body = await res.json();
         if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
         state.dataset = body;
@@ -184,6 +191,8 @@
       { label: 'Recognition failures', value: pct(s.recognitionFailureRate, 1), meter: s.recognitionFailureRate, sub: 'Sessions with no-match / no-input' },
       { label: 'Turns per session', value: num(s.avgTurns, 1), sub: 'Average' },
       { label: 'Session length', value: fmtDuration(s.medianDurationMs), sub: 'Median' },
+      { label: 'Bot response time', value: fmtMs(s.medianResponseMs), sub: s.responseTurns ? `Median of ${num(s.responseTurns)} turns in ${num(s.timedSessions)} of ${num(s.sessions)} sessions` : 'No turn timing reported' },
+      { label: 'Longest response', value: fmtMs(s.maxResponseMs), sub: 'Slowest single bot reply' },
     ];
     $('kpis').innerHTML = tiles
       .map((t) => `<div class="kpi"><div class="kpi-label">${esc(t.label)}</div><div class="kpi-value">${esc(t.value)}</div>` +
@@ -315,11 +324,11 @@
 
   function renderBots(rows) {
     const el = $('bots');
-    el.innerHTML = `<thead><tr><th>Virtual agent</th><th>Channel</th><th class="num">Sessions</th><th class="num">Contained</th><th class="num">Reached agent</th><th class="num">Self-service</th><th class="num">Intent recognized</th><th class="num">Recog. failures</th><th class="num">Avg turns</th><th class="num">Median length</th></tr></thead><tbody>` +
+    el.innerHTML = `<thead><tr><th>Virtual agent</th><th>Channel</th><th class="num">Sessions</th><th class="num">Contained</th><th class="num">Reached agent</th><th class="num">Self-service</th><th class="num">Intent recognized</th><th class="num">Recog. failures</th><th class="num">Avg turns</th><th class="num">Median length</th><th class="num">Median response</th><th class="num">Longest response</th></tr></thead><tbody>` +
       (rows.length ? visibleRows('bots', rows, (r) => r.botId === state.filters.bot).map((r) => `<tr data-key="${esc(r.botId)}" class="${state.filters.bot === r.botId ? 'active' : ''}" tabindex="0">
         <td class="cell-strong">${esc(r.botName)}</td><td>${esc(r.media)}</td><td class="num">${num(r.sessions)}</td>${rateCell(r.containmentRate)}<td class="num">${pct(r.agentRate)}</td>
-        <td class="num">${pct(r.selfServiceRate)}</td><td class="num">${pct(r.intentRate)}</td><td class="num">${pct(r.recognitionFailureRate)}</td><td class="num">${num(r.avgTurns, 1)}</td><td class="num">${fmtDuration(r.medianDurationMs)}</td></tr>`).join('')
-        : '<tr class="empty"><td colspan="10">No sessions match these filters.</td></tr>') + '</tbody>';
+        <td class="num">${pct(r.selfServiceRate)}</td><td class="num">${pct(r.intentRate)}</td><td class="num">${pct(r.recognitionFailureRate)}</td><td class="num">${num(r.avgTurns, 1)}</td><td class="num">${fmtDuration(r.medianDurationMs)}</td><td class="num">${fmtMs(r.medianResponseMs)}</td><td class="num">${fmtMs(r.maxResponseMs)}</td></tr>`).join('')
+        : '<tr class="empty"><td colspan="12">No sessions match these filters.</td></tr>') + '</tbody>';
     bindRowFilter(el, 'bot');
     renderShowMore('bots', rows.length);
   }
@@ -341,6 +350,7 @@
     { key: 'intents', label: 'Intents', value: (s) => s.intents.join(', ') },
     { key: 'turns', label: 'Turns', value: (s) => s.turns, num: true },
     { key: 'durationMs', label: 'Length', value: (s) => s.durationMs ?? -1, num: true },
+    { key: 'response', label: 'Response (median · max)', value: (s) => M.sessionResponse(s).maxResponseMs ?? -1, num: true },
   ];
 
   function searchedSessions() {
@@ -360,6 +370,11 @@
     return `<span class="badge ${c}">${label}${s.escalation == null && c !== 'unknown' ? ' <span class="est">(est.)</span>' : ''}</span>`;
   }
 
+  function responseCell(s) {
+    const r = M.sessionResponse(s);
+    return r.responseTurns ? `${fmtMs(r.medianResponseMs)} · <span class="cell-strong">${fmtMs(r.maxResponseMs)}</span>` : '<span class="muted">–</span>';
+  }
+
   function renderSessions() {
     const rows = searchedSessions();
     const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
@@ -377,11 +392,12 @@
         <td>${esc(M.resultLabel(s.botResult))}${s.recognitionFailures ? `<div class="cell-sub">${s.recognitionFailures} recognition failure${s.recognitionFailures > 1 ? 's' : ''}</div>` : ''}</td>
         <td><div class="chips">${s.intents.map((i) => `<span class="chip">${esc(i)}</span>`).join('') || '<span class="muted">–</span>'}</div></td>
         <td class="num">${num(s.turns)}</td>
-        <td class="num">${fmtDuration(s.durationMs)}</td></tr>`).join('')
-        : '<tr class="empty"><td colspan="8">No sessions match these filters.</td></tr>') + '</tbody>';
+        <td class="num">${fmtDuration(s.durationMs)}</td>
+        <td class="num">${responseCell(s)}</td></tr>`).join('')
+        : '<tr class="empty"><td colspan="9">No sessions match these filters.</td></tr>') + '</tbody>';
     el.querySelectorAll('th[data-sort]').forEach((th) => th.addEventListener('click', () => {
       const k = th.dataset.sort;
-      state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : k === 'start' || k === 'turns' || k === 'durationMs' ? -1 : 1 };
+      state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : ['start', 'turns', 'durationMs', 'response'].includes(k) ? -1 : 1 };
       renderSessions();
     }));
     el.querySelectorAll('tbody tr[data-id]').forEach((tr) => {
@@ -400,9 +416,9 @@
 
   function exportCsv() {
     const rows = searchedSessions();
-    const header = ['Started', 'Virtual agent', 'Bot ID', 'Channel', 'Outcome', 'Escalation', 'Queue', 'Bot exit', 'Intents', 'Final intent', 'Recognition failures', 'Turns', 'Length (s)', 'Conversation ID', 'Bot session ID'];
+    const header = ['Started', 'Virtual agent', 'Bot ID', 'Channel', 'Outcome', 'Escalation', 'Queue', 'Bot exit', 'Intents', 'Final intent', 'Recognition failures', 'Turns', 'Length (s)', 'Median response (ms)', 'Longest response (ms)', 'Conversation ID', 'Bot session ID'];
     const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const lines = [header.map(cell).join(',')].concat(rows.map((s) => [s.start, s.botName, s.botId, s.media, M.containment(s), s.escalation ?? 'estimated', s.queueName, M.resultLabel(s.botResult), s.intents.join('; '), s.finalIntent, s.recognitionFailures, s.turns, s.durationMs == null ? '' : Math.round(s.durationMs / 1000), s.conversationId, s.id].map(cell).join(',')));
+    const lines = [header.map(cell).join(',')].concat(rows.map((s) => [s.start, s.botName, s.botId, s.media, M.containment(s), s.escalation ?? 'estimated', s.queueName, M.resultLabel(s.botResult), s.intents.join('; '), s.finalIntent, s.recognitionFailures, s.turns, s.durationMs == null ? '' : Math.round(s.durationMs / 1000), M.sessionResponse(s).medianResponseMs ?? '', M.sessionResponse(s).maxResponseMs ?? '', s.conversationId, s.id].map(cell).join(',')));
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -431,6 +447,7 @@
           detail = SNAPSHOT.details?.[s.id] || null;
         } else {
           const qs = new URLSearchParams({ conversationId: s.conversationId || '', botId: s.botId || '', sessionId: s.id });
+          if (state.org) qs.set('org', state.org);
           const res = await fetch(`api/session?${qs}`);
           const json = await res.json();
           if (!res.ok) throw new Error(json.error || `Request failed (${res.status})`);
@@ -458,6 +475,7 @@
       ['Bot exit', esc(M.resultLabel(s.botResult)), true],
       ['Turns', num(s.turns)],
       ['Bot session length', fmtDuration(s.durationMs)],
+      ['Bot response (median · longest)', M.sessionResponse(s).responseTurns ? `${fmtMs(M.sessionResponse(s).medianResponseMs)} · ${fmtMs(M.sessionResponse(s).maxResponseMs)}` : '–'],
       ['Intents', s.intents.length ? s.intents.map(esc).join(', ') : '–', true],
       ['Final intent', esc(s.finalIntent || '–'), true],
       ['Recognition failures', s.recognitionFailures ? `${s.recognitionFailures} (${s.recognitionFailureReasons.map((r) => esc(M.failureLabel(r))).join(', ')})` : '0', true],
@@ -488,6 +506,7 @@
       for (const sl of t.slots) userMeta.push(`<span class="chip">${esc(sl.name)} = ${esc(sl.value)}</span>`);
       if (t.result) userMeta.push(`<span class="chip ${/Success/.test(t.result) ? 'ok' : /NoMatch|NoInput|Error|Failure/.test(t.result) ? 'fail' : ''}">${esc(t.result.replace(/([a-z])([A-Z])/g, '$1 $2'))}</span>`);
       const botMeta = [];
+      if (t.responseMs != null) botMeta.push(`<span class="chip">Replied in ${esc(fmtMs(t.responseMs))}</span>`);
       if (t.action) botMeta.push(`<span class="chip">${esc(t.action.name)}</span>`);
       for (const c of t.toolCalls) botMeta.push(`<span class="chip ${c.status === 'Success' ? 'ok' : 'fail'}">Tool ${esc(c.name)} · ${esc(c.status)}${c.latencyMs != null ? ` · ${c.latencyMs} ms` : ''}</span>`);
       if (t.guardrailEvents) botMeta.push(`<span class="chip fail">${t.guardrailEvents} guardrail event${t.guardrailEvents > 1 ? 's' : ''}</span>`);
@@ -509,7 +528,28 @@
     render();
   }
 
-  function init() {
+  async function loadOrgs() {
+    const sel = $('f-org');
+    if (SNAPSHOT) {
+      const label = SNAPSHOT.dataset.org?.label || 'Snapshot';
+      sel.innerHTML = `<option>${esc(label)}</option>`;
+      sel.disabled = true;
+      return;
+    }
+    try {
+      const res = await fetch('api/orgs');
+      const body = await res.json();
+      state.orgs = body.orgs || [];
+    } catch {
+      state.orgs = [];
+    }
+    if (!state.orgs.some((o) => o.key === state.org)) state.org = state.orgs[0]?.key || '';
+    sel.innerHTML = state.orgs.map((o) => `<option value="${esc(o.key)}">${esc(o.label)}${o.error ? ' (sign-in failed)' : ''}</option>`).join('');
+    sel.value = state.org;
+    sel.disabled = state.orgs.length < 2;
+  }
+
+  async function init() {
     readHash();
     $('f-range').value = state.range;
     $('f-from').value = state.from || '';
@@ -521,6 +561,15 @@
       $('refresh').hidden = true;
       $('export').hidden = true; // a static snapshot can't always start downloads
     }
+    await loadOrgs();
+    $('f-org').addEventListener('change', (e) => {
+      // Bots, intents and queues differ between orgs, so start the new org unfiltered.
+      state.org = e.target.value;
+      for (const k of Object.keys(state.filters)) state.filters[k] = '';
+      state.detailCache.clear();
+      state.page = 1;
+      load();
+    });
 
     $('f-range').addEventListener('change', (e) => {
       state.range = e.target.value;
