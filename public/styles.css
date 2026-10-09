@@ -212,3 +212,7 @@ table.data .empty td { cursor: default; color: var(--muted); text-align: center;
   .field { flex: 1 1 140px; }
   .field select, .field input { max-width: none; width: 100%; }
 }
+
+.check-ok { color: var(--good); white-space: nowrap; }
+.check-diff { color: var(--critical); white-space: nowrap; }
+.verify-note { color: var(--text-2); margin: 0; max-width: 65ch; }

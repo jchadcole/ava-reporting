@@ -16,6 +16,8 @@ Custom reporting for Genesys Cloud virtual agents (bots and AI Virtual Agents). 
 
 The definitions behind each number are at the bottom of the page.
 
+**Check against Genesys** (top right) compares the dashboard's totals with Genesys's own analytics for the same org, time range and virtual agent: sessions, turns, exits, disconnects, recognition failures, self-served questions, conversations, conversations that reached an agent, and sessions per intent. Genesys's figures come from separate aggregate and conversation-detail queries (`server/verify.js`), so a mistake in how the dashboard merges or classifies sessions shows up as a difference.
+
 ## How it works
 
 ```

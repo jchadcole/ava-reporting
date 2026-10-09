@@ -76,3 +76,14 @@ test('response stats pool every customer turn across sessions', () => {
   assert.equal(M.sessionResponse(rows[2]).maxResponseMs, null);
   assert.equal(M.botTable(rows.map((r) => ({ ...r, botId: 'b', botName: 'B' })))[0].maxResponseMs, 5000);
 });
+
+test('verificationTotals rebuilds Genesys-style totals from session rows', () => {
+  const rows = [
+    session({ conversationId: 'c1', outcome: 'exit', turns: 3, recognitionFailures: 1, queries: 2, selfServedQueries: 1, intents: ['Billing'], escalation: 'agent' }),
+    session({ conversationId: 'c1', outcome: 'disconnect', turns: 1, escalation: 'agent' }),
+    session({ conversationId: 'c2', outcome: 'unknown', turns: 2, intents: ['Billing', 'Hours'], escalation: 'none' }),
+  ];
+  const v = M.verificationTotals(rows);
+  assert.deepEqual(v.totals, { sessions: 3, turns: 6, exits: 1, disconnects: 1, recognitionFailures: 1, queries: 2, selfServedQueries: 1, conversations: 2, conversationsWithAgent: 1 });
+  assert.deepEqual(v.intentSessions, { Billing: 2, Hours: 1 });
+});

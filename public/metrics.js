@@ -211,7 +211,30 @@
     };
   }
 
-  const api = { containment, applyFilters, summarize, byDay, byResult, byFailureReason, intentTable, botTable, options, resultLabel, failureLabel, localDay, median, responseStats, sessionResponse };
+  // The dashboard's side of "Check against Genesys": the same totals Genesys reports in
+  // its own aggregates, rebuilt from the session rows the dashboard uses.
+  function verificationTotals(sessions) {
+    const sum = (f) => sessions.reduce((a, s) => a + (f(s) || 0), 0);
+    const conversations = (pred) => new Set(sessions.filter(pred).map((s) => s.conversationId).filter(Boolean)).size;
+    const intentSessions = {};
+    for (const s of sessions) for (const i of s.intents) intentSessions[i] = (intentSessions[i] || 0) + 1;
+    return {
+      totals: {
+        sessions: sessions.length,
+        turns: sum((s) => s.turns),
+        exits: sessions.filter((s) => s.outcome === 'exit').length,
+        disconnects: sessions.filter((s) => s.outcome === 'disconnect').length,
+        recognitionFailures: sum((s) => s.recognitionFailures),
+        queries: sum((s) => s.queries),
+        selfServedQueries: sum((s) => s.selfServedQueries),
+        conversations: conversations(() => true),
+        conversationsWithAgent: conversations((s) => s.escalation === 'agent'),
+      },
+      intentSessions,
+    };
+  }
+
+  const api = { verificationTotals, containment, applyFilters, summarize, byDay, byResult, byFailureReason, intentTable, botTable, options, resultLabel, failureLabel, localDay, median, responseStats, sessionResponse };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);

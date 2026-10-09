@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const { buildDataset } = require('./dataset');
 const { getSessionDetail } = require('./detail');
 const { getOrg, listOrgs } = require('./orgs');
+const { buildVerification } = require('./verify');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -63,6 +64,16 @@ async function handleApi(req, res, url) {
     if (endMs - startMs > MAX_RANGE_DAYS * 86_400_000) return sendJson(res, 400, { error: `Date range is limited to ${MAX_RANGE_DAYS} days` });
     const key = `dataset:${org.key}:${new Date(startMs).toISOString()}:${new Date(endMs).toISOString()}`;
     return sendJson(res, 200, await cached(key, () => buildDataset(org.client, start, end)));
+  }
+
+  if (url.pathname === '/api/verify') {
+    const start = url.searchParams.get('start');
+    const end = url.searchParams.get('end');
+    const bot = url.searchParams.get('bot') || null;
+    if (Number.isNaN(Date.parse(start)) || Number.isNaN(Date.parse(end))) return sendJson(res, 400, { error: 'start and end must be ISO timestamps' });
+    if (bot && !ID_PATTERN.test(bot)) return sendJson(res, 400, { error: 'Invalid bot' });
+    const key = `verify:${org.key}:${start}:${end}:${bot}`;
+    return sendJson(res, 200, await cached(key, () => buildVerification(org.client, start, end, bot)));
   }
 
   if (url.pathname === '/api/session') {

@@ -493,6 +493,77 @@
     }
   }
 
+  // ---------- Check against Genesys ----------
+  const VERIFY_ROWS = [
+    ['sessions', 'Bot sessions', 'nBotSessions'],
+    ['turns', 'Bot turns', 'nBotSessionTurns'],
+    ['exits', 'Sessions that exited the bot', 'tBotExit count'],
+    ['disconnects', 'Sessions that disconnected in the bot', 'tBotDisconnect count'],
+    ['recognitionFailures', 'Recognition failures', 'tBotRecognitionFailure count'],
+    ['queries', 'Customer questions', 'oBotSessionQuery sum'],
+    ['selfServedQueries', 'Questions self-served', 'oBotSessionQuerySelfServed sum'],
+    ['conversations', 'Conversations with a bot', 'Conversation detail search, bot participant'],
+    ['conversationsWithAgent', 'Conversations that reached an agent', 'Conversation detail search, bot and connected agent'],
+  ];
+
+  async function openVerify() {
+    if (!state.dataset) return;
+    lastFocus = document.activeElement;
+    const drawer = $('drawer');
+    drawer.classList.add('open');
+    drawer.setAttribute('aria-hidden', 'false');
+    const bot = state.filters.bot;
+    const botName = bot ? state.dataset.sessions.find((s) => s.botId === bot)?.botName : null;
+    $('drawer-title').textContent = 'Check against Genesys';
+    $('drawer-sub').textContent = `${$('subtitle').textContent}${botName ? ` · ${botName}` : ' · all virtual agents'}`;
+    $('drawer-close').focus();
+    const body = $('drawer-body');
+    body.innerHTML = '<div class="empty-state">Asking Genesys for its own totals…</div>';
+    try {
+      const qs = new URLSearchParams({ start: state.dataset.interval.start, end: state.dataset.interval.end });
+      if (state.org) qs.set('org', state.org);
+      if (bot) qs.set('bot', bot);
+      const res = await fetch(`api/verify?${qs}`);
+      const genesys = await res.json();
+      if (!res.ok) throw new Error(genesys.error || `Request failed (${res.status})`);
+      if ($('drawer-title').textContent !== 'Check against Genesys') return;
+      const mine = M.verificationTotals(M.applyFilters(state.dataset.sessions, { botIds: bot ? [bot] : null }));
+      body.innerHTML = verifyHtml(mine, genesys, !!bot);
+    } catch (err) {
+      body.innerHTML = `<div class="empty-state">Couldn’t get Genesys totals: ${esc(err.message)}</div>`;
+    }
+  }
+
+  function checkCell(a, b) {
+    if (a == null || b == null) return '<td class="muted">–</td>';
+    const d = a - b;
+    return d === 0 ? '<td class="check-ok">✓ Match</td>' : `<td class="check-diff">⚠ ${d > 0 ? '+' : ''}${num(d)}</td>`;
+  }
+
+  function verifyHtml(mine, genesys, oneBot) {
+    const rows = VERIFY_ROWS.filter(([k]) => genesys.totals[k] != null);
+    const diffs = rows.filter(([k]) => mine.totals[k] !== genesys.totals[k]).length;
+    const intents = Object.keys({ ...mine.intentSessions, ...genesys.intentSessions })
+      .map((i) => [i, mine.intentSessions[i] || 0, genesys.intentSessions[i] || 0])
+      .sort((a, b) => b[2] - a[2] || b[1] - a[1]);
+    const intentDiffs = intents.filter(([, a, b]) => a !== b).length;
+    return `<section class="verify-note">
+        <p class="verify-note">Genesys’s numbers below come from separate queries to its own analytics, for the same org and time range${oneBot ? ' and virtual agent' : ''}. Only the virtual agent filter applies here; other filters are ignored. ${diffs || intentDiffs ? `${diffs + intentDiffs} row${diffs + intentDiffs > 1 ? 's differ' : ' differs'}; see the notes below.` : 'Every row matches.'}</p>
+      </section>
+      <section><h3>Totals</h3><div class="table-wrap"><table class="data"><thead><tr><th>Measure</th><th class="num">Dashboard</th><th class="num">Genesys</th><th>Check</th></tr></thead><tbody>
+        ${rows.map(([k, label, source]) => `<tr style="cursor:default"><td><div class="cell-strong">${esc(label)}</div><div class="cell-sub">${esc(source)}</div></td><td class="num">${num(mine.totals[k])}</td><td class="num">${num(genesys.totals[k])}</td>${checkCell(mine.totals[k], genesys.totals[k])}</tr>`).join('')}
+      </tbody></table></div></section>
+      <section><h3>Sessions per intent</h3><div class="table-wrap"><table class="data"><thead><tr><th>Intent</th><th class="num">Dashboard</th><th class="num">Genesys</th><th>Check</th></tr></thead><tbody>
+        ${intents.length ? intents.map(([i, a, b]) => `<tr style="cursor:default"><td>${esc(i)}</td><td class="num">${num(a)}</td><td class="num">${num(b)}</td>${checkCell(a, b)}</tr>`).join('') : '<tr class="empty"><td colspan="4">No intents in this range.</td></tr>'}
+      </tbody></table></div></section>
+      <section><h3>Why a row can differ</h3><ul class="verify-note">
+        <li><b>Conversations with a bot</b>: third-party bots don’t appear as a bot participant in conversation detail, so their conversations count on the dashboard but not in Genesys’s search.</li>
+        <li>Survey bots (${esc(genesys.excludedBotTypes.join(', ') || 'none')}) are left out on both sides.</li>
+        <li>Data still arriving: Genesys finishes some sessions minutes after they end. Press Refresh and check again.</li>
+        <li>To check a single session, copy its conversation ID from the session list and search for it in Genesys under Performance › Workspace › Interactions.</li>
+      </ul></section>`;
+  }
+
   function closeDrawer() {
     const drawer = $('drawer');
     drawer.classList.remove('open');
@@ -590,6 +661,7 @@
       $('f-range').disabled = true;
       $('f-range').innerHTML = '<option>Snapshot range</option>';
       $('refresh').hidden = true;
+      $('verify').hidden = true; // needs the live server
       $('export').hidden = true; // a static snapshot can't always start downloads
     }
     await loadOrgs();
@@ -632,6 +704,7 @@
     });
     $('refresh').addEventListener('click', load);
     $('export').addEventListener('click', exportCsv);
+    $('verify').addEventListener('click', openVerify);
     $('drawer-close').addEventListener('click', closeDrawer);
     $('drawer').addEventListener('click', (e) => { if (e.target === $('drawer')) closeDrawer(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('drawer').classList.contains('open')) closeDrawer(); });
