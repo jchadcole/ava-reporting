@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AVA Performance</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="page-header">
+    <div>
+      <h1>AVA Performance</h1>
+      <p class="subtitle" id="subtitle">Containment and intent reporting for Genesys Cloud virtual agents</p>
+    </div>
+    <div class="header-actions">
+      <span class="muted" id="updated"></span>
+      <button type="button" class="btn" id="refresh">Refresh</button>
+    </div>
+  </header>
+
+  <section class="filters" aria-label="Filters">
+    <label class="field">
+      <span>Date range</span>
+      <select id="f-range">
+        <option value="1">Last 24 hours</option>
+        <option value="7">Last 7 days</option>
+        <option value="30" selected>Last 30 days</option>
+        <option value="90">Last 90 days</option>
+        <option value="custom">Custom…</option>
+      </select>
+    </label>
+    <label class="field custom-range" hidden><span>From</span><input type="date" id="f-from"></label>
+    <label class="field custom-range" hidden><span>To</span><input type="date" id="f-to"></label>
+    <label class="field"><span>Virtual agent</span><select id="f-bot"><option value="">All virtual agents</option></select></label>
+    <label class="field"><span>Channel</span><select id="f-media"><option value="">All channels</option></select></label>
+    <label class="field"><span>Intent</span><select id="f-intent"><option value="">All intents</option></select></label>
+    <label class="field"><span>Outcome</span>
+      <select id="f-containment">
+        <option value="">All outcomes</option>
+        <option value="contained">Contained</option>
+        <option value="escalated">Escalated</option>
+      </select>
+    </label>
+    <label class="field"><span>Bot exit</span><select id="f-result"><option value="">All exit reasons</option></select></label>
+    <label class="field"><span>Recognition failure</span>
+      <select id="f-failure">
+        <option value="">Any</option>
+        <option value="yes">Had a failure</option>
+        <option value="no">No failures</option>
+      </select>
+    </label>
+    <button type="button" class="btn btn-ghost" id="f-reset">Reset</button>
+  </section>
+
+  <div class="banner" id="banner" hidden></div>
+
+  <main id="main">
+    <section class="kpis" id="kpis" aria-label="Key metrics"></section>
+
+    <section class="grid two">
+      <article class="card">
+        <header class="card-head">
+          <h2>Sessions per day</h2>
+          <div class="legend" id="trend-legend"></div>
+        </header>
+        <div class="chart" id="trend"></div>
+      </article>
+      <article class="card">
+        <header class="card-head"><h2>Why sessions left the bot</h2></header>
+        <div id="results" class="bar-list"></div>
+      </article>
+    </section>
+
+    <section class="grid two wide-left">
+      <article class="card">
+        <header class="card-head">
+          <h2>Intent performance</h2>
+          <span class="muted small">Select a row to filter</span>
+        </header>
+        <div class="table-wrap"><table class="data" id="intents"></table></div>
+      </article>
+      <article class="card">
+        <header class="card-head"><h2>Recognition failures</h2></header>
+        <div id="failures" class="bar-list"></div>
+      </article>
+    </section>
+
+    <section class="card">
+      <header class="card-head">
+        <h2>Virtual agents</h2>
+        <span class="muted small">Select a row to filter</span>
+      </header>
+      <div class="table-wrap"><table class="data" id="bots"></table></div>
+    </section>
+
+    <section class="card" id="sessions-card">
+      <header class="card-head">
+        <h2>Sessions <span class="muted" id="session-count"></span></h2>
+        <div class="card-actions">
+          <input type="search" id="f-search" placeholder="Search conversation ID" aria-label="Search conversation ID">
+          <button type="button" class="btn" id="export">Export CSV</button>
+        </div>
+      </header>
+      <div class="table-wrap"><table class="data sessions" id="sessions"></table></div>
+      <nav class="pager" id="pager" aria-label="Pagination"></nav>
+    </section>
+
+    <section class="card definitions">
+      <h2>How these numbers are calculated</h2>
+      <dl>
+        <dt>Contained</dt><dd>The conversation never reached a queue or an agent after the bot session. When Genesys has no conversation detail for a session, a disconnect inside the bot counts as contained and an exit back to the flow counts as escalated.</dd>
+        <dt>Reached an agent</dt><dd>An agent connected to the conversation that included the bot session.</dd>
+        <dt>Query self-service rate</dt><dd>Customer questions the bot marked as self-served, divided by all questions it handled (Genesys oBotSessionQuerySelfServed / oBotSessionQuery).</dd>
+        <dt>Intent recognized</dt><dd>Sessions where the bot matched at least one intent.</dd>
+        <dt>Recognition failure</dt><dd>Sessions with at least one no-match or no-input event.</dd>
+      </dl>
+    </section>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+
+  <aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="drawer-title">
+    <div class="drawer-panel" role="dialog" aria-modal="true">
+      <header class="drawer-head">
+        <div>
+          <h2 id="drawer-title">Session</h2>
+          <p class="muted" id="drawer-sub"></p>
+        </div>
+        <button type="button" class="btn btn-ghost" id="drawer-close" aria-label="Close">✕</button>
+      </header>
+      <div class="drawer-body" id="drawer-body"></div>
+    </div>
+  </aside>
+
+  <script src="metrics.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

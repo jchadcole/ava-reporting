@@ -1,0 +1,67 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const M = require('../public/metrics');
+
+const base = { intents: [], finalIntent: null, recognitionFailures: 0, recognitionFailureReasons: [], queries: 0, selfServedQueries: 0, turns: 2, durationMs: 1000, media: 'Voice' };
+const session = (over) => ({ ...base, id: Math.random().toString(36).slice(2), ...over });
+
+test('containment prefers conversation escalation over bot outcome', () => {
+  assert.equal(M.containment(session({ escalation: 'agent', outcome: 'disconnect' })), 'escalated');
+  assert.equal(M.containment(session({ escalation: 'queue', outcome: 'disconnect' })), 'escalated');
+  assert.equal(M.containment(session({ escalation: 'none', outcome: 'exit' })), 'contained');
+});
+
+test('containment falls back to bot outcome without conversation detail', () => {
+  assert.equal(M.containment(session({ escalation: null, outcome: 'disconnect' })), 'contained');
+  assert.equal(M.containment(session({ escalation: null, outcome: 'exit' })), 'escalated');
+  assert.equal(M.containment(session({ escalation: null, outcome: 'unknown' })), 'unknown');
+});
+
+test('summarize computes rates over known outcomes', () => {
+  const rows = [
+    session({ escalation: 'none', queries: 2, selfServedQueries: 2, intents: ['Billing'] }),
+    session({ escalation: 'agent', queries: 2, selfServedQueries: 0, recognitionFailures: 1, turns: 4, durationMs: 3000 }),
+    session({ escalation: null, outcome: 'unknown' }),
+  ];
+  const s = M.summarize(rows);
+  assert.equal(s.sessions, 3);
+  assert.equal(s.contained, 1);
+  assert.equal(s.escalated, 1);
+  assert.equal(s.unknown, 1);
+  assert.equal(s.containmentRate, 0.5);
+  assert.equal(s.selfServiceRate, 0.5);
+  assert.equal(s.agentRate, 1 / 3);
+  assert.equal(s.recognitionFailureRate, 1 / 3);
+  assert.equal(s.medianDurationMs, 1000);
+  assert.equal(s.avgTurns, 8 / 3);
+});
+
+test('applyFilters matches bot, intent (including final intent), outcome and failures', () => {
+  const rows = [
+    session({ botId: 'a', intents: ['Billing'], escalation: 'none' }),
+    session({ botId: 'a', finalIntent: 'Billing', escalation: 'agent', recognitionFailures: 1 }),
+    session({ botId: 'b', intents: ['Hours'], escalation: 'none', media: 'Messaging' }),
+  ];
+  assert.equal(M.applyFilters(rows, { botIds: ['a'] }).length, 2);
+  assert.equal(M.applyFilters(rows, { intent: 'Billing' }).length, 2);
+  assert.equal(M.applyFilters(rows, { intent: 'Billing', containment: 'contained' }).length, 1);
+  assert.equal(M.applyFilters(rows, { recognitionFailure: 'yes' }).length, 1);
+  assert.equal(M.applyFilters(rows, { media: 'Messaging' }).length, 1);
+});
+
+test('byDay fills empty days in the interval', () => {
+  const days = M.byDay([session({ start: '2026-10-02T12:00:00', escalation: 'none' })], '2026-10-01T00:00:00', '2026-10-04T00:00:00');
+  assert.deepEqual(days.map((d) => d.day), ['2026-10-01', '2026-10-02', '2026-10-03']);
+  assert.equal(days[1].contained, 1);
+});
+
+test('intentTable counts each session once per intent', () => {
+  const rows = [session({ intents: ['Billing'], finalIntent: 'Billing', escalation: 'none' }), session({ intents: ['Billing', 'Hours'], escalation: 'agent' })];
+  const t = M.intentTable(rows);
+  const billing = t.find((r) => r.intent === 'Billing');
+  assert.equal(billing.sessions, 2);
+  assert.equal(billing.asFinal, 1);
+  assert.equal(billing.containmentRate, 0.5);
+  assert.equal(t.find((r) => r.intent === 'Hours').share, 0.5);
+});

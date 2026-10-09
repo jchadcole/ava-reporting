@@ -1,0 +1,13 @@
+{
+  "name": "ava-reporting",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Custom containment and intent reporting for Genesys Cloud virtual agents (AVA)",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test",
+    "snapshot": "node scripts/snapshot.js"
+  }
+}
