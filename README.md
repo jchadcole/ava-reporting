@@ -16,6 +16,10 @@ Custom reporting for Genesys Cloud virtual agents (bots and AI Virtual Agents). 
 
 The definitions behind each number are at the bottom of the page.
 
+**Escalations** (second tab) explains why sessions went to a person. Every escalated session (its conversation reached a queue or an agent) gets a reason category, a one- or two-sentence explanation, and who started the hand-off (the customer or the virtual agent), with a chart of how often each reason occurs. The categories are: AVA couldn’t resolve it, hand-off by design, customer wanted a person, illegal or dangerous request, customer may be in danger, and other or unclear. Select a bar to filter the list, and a row to open its transcript.
+
+The reasons come from Claude reading the session’s bot transcript (`server/escalations.js`). This sends conversation content to Anthropic’s API, so it only runs when `ANTHROPIC_API_KEY` is set. Before anything is sent, long digit runs such as card and account numbers are masked. When Genesys no longer has the transcript (turn data is kept for about 10 days), Genesys’s own AI conversation summary is used instead, where the org has one. Each session is analyzed once and the result is saved in `data/escalation-analyses.json`. Without a key, the tab lists Genesys’s summary reason where there is one.
+
 **Check against Genesys** (top right) compares the dashboard's totals with Genesys's own analytics for the same org, time range and virtual agent: sessions, turns, exits, disconnects, recognition failures, self-served questions, conversations, conversations that reached an agent, and sessions per intent. Genesys's figures come from separate aggregate and conversation-detail queries (`server/verify.js`), so a mistake in how the dashboard merges or classifies sessions shows up as a difference.
 
 ## How it works
@@ -33,6 +37,7 @@ The server is a small Node app with no dependencies. It holds the OAuth client s
 | Drill-down conversation path | `GET /api/v2/analytics/conversations/{id}/details` |
 | Bot response time per customer turn | `GET /api/v2/analytics/botflows/{botId}/reportingturns?interval=…` for each bot in the range |
 | Drill-down transcript | `GET /api/v2/analytics/botflows/{botId}/reportingturns?sessionId=…` |
+| Genesys AI summary and contact reason for escalated sessions | `GET /api/v2/conversations/{id}/summaries` |
 
 The browser receives the session rows for the selected date range once and computes every panel locally (`public/metrics.js`), so changing a filter is instant and all panels agree. Results are cached on the server for two minutes.
 
@@ -45,6 +50,7 @@ Bot response time is measured per customer turn, from when Genesys captured the 
 Requires Node 20 or later.
 
 ```sh
+npm install            # the Anthropic SDK, used for the Escalations tab
 cp .env.example .env   # fill in the Genesys OAuth client
 node --env-file=.env server/index.js   # http://127.0.0.1:3000
 ```
@@ -64,6 +70,11 @@ The OAuth client needs read access to analytics (conversation details, bot aggre
 | `EXCLUDE_BOT_TYPES` | `VOICESURVEY` | Bot flow types left out of the report |
 | `MASK_SENSITIVE` | `true` | Mask long digit runs and sensitive slots in transcripts |
 | `CACHE_TTL_SECONDS` | `120` | Server-side cache lifetime |
+| `ANTHROPIC_API_KEY` | unset | Turns on the escalation reason analysis (sends masked transcripts of escalated sessions to Anthropic) |
+| `ESCALATION_MODEL` | `claude-opus-5-5` | Claude model used for the analysis |
+| `ESCALATION_ANALYSIS` | on | Set to `off` to stop sending transcripts even when a key is set |
+| `MAX_ESCALATION_SESSIONS` | `300` | Most recent escalated sessions analyzed per date range |
+| `ESCALATION_CACHE_FILE` | `data/escalation-analyses.json` | Where saved analyses are kept |
 
 ## Several orgs
 

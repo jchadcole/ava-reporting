@@ -131,4 +131,4 @@ async function getSessionDetail(client, { conversationId, botId, sessionId }) {
   };
 }
 
-module.exports = { getSessionDetail, turnResponseMs, maskText, summarizeTurn, summarizeParticipant };
+module.exports = { getSessionDetail, fetchTurns, turnResponseMs, maskText, summarizeTurn, summarizeParticipant };

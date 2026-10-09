@@ -4,10 +4,15 @@
   "private": true,
   "description": "Custom containment and intent reporting for Genesys Cloud virtual agents (AVA)",
   "license": "MIT",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server/index.js",
     "test": "node --test",
     "snapshot": "node scripts/snapshot.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0"
   }
 }

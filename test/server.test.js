@@ -95,3 +95,25 @@ test('verify sums respect the preview filter and skip survey bots', () => {
   assert.equal(sumMetric(results, 'nBotSessions', 'count', 'include'), 7);
   assert.equal(sumMetric(results, 'nBotSessions', 'count', 'only'), 2);
 });
+
+test('escalation transcripts read in conversation order with sensitive digits masked', () => {
+  const { transcriptText, analysisInput } = require('../server/escalations');
+  const turns = [
+    { userInput: '', botPrompts: ['Hi, how can I help?'] },
+    { userInput: 'my card is 4111 1111 1111 1234', botPrompts: ['Thanks, one moment.'], intent: { name: 'Billing' } },
+    { userInput: 'I want a person', botPrompts: ['Transferring you now.'], sessionEnd: 'Exit: AgentRequestedByUser' },
+  ];
+  const text = transcriptText({}, turns);
+  assert.deepEqual(text.split('\n'), [
+    'Bot: Hi, how can I help?',
+    'Customer: my card is 4111 1111 1111 1234'.replace('4111 1111 1111 1234', require('../server/detail').maskText('4111 1111 1111 1234')),
+    '[intent: Billing]',
+    'Bot: Thanks, one moment.',
+    'Customer: I want a person',
+    '[bot session ended: Exit: AgentRequestedByUser]',
+    'Bot: Transferring you now.',
+  ]);
+  assert.ok(!text.includes('4111'));
+  const input = analysisInput({ botName: 'Billing Bot', media: 'Voice', escalation: 'agent', queueName: 'Billing' }, text, null);
+  assert.match(input, /connected to an agent from the Billing queue/);
+});

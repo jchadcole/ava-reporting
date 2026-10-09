@@ -33,7 +33,10 @@
     range: '30',
     from: null,
     to: null,
-    filters: { bot: '', media: '', intent: '', intentCount: '', containment: '', result: '', failure: '', preview: '', search: '' },
+    filters: { bot: '', media: '', intent: '', intentCount: '', containment: '', result: '', failure: '', preview: '', search: '', why: '' },
+    tab: 'overview',
+    escalations: { key: null, data: null, error: null, loading: false },
+    escalationLimit: 100,
     dataset: null,
     filtered: [],
     page: 1,
@@ -72,6 +75,7 @@
     if (p.get('range')) state.range = p.get('range');
     if (p.get('from')) state.from = p.get('from');
     if (p.get('to')) state.to = p.get('to');
+    if (p.get('tab') === 'escalations' && !SNAPSHOT) state.tab = 'escalations';
     for (const k of Object.keys(state.filters)) if (p.get(k)) state.filters[k] = p.get(k);
   }
   function writeHash() {
@@ -84,6 +88,7 @@
         if (state.to) p.set('to', state.to);
       }
     }
+    if (state.tab !== 'overview') p.set('tab', state.tab);
     for (const [k, v] of Object.entries(state.filters)) if (v) p.set(k, v);
     history.replaceState(null, '', `#${p.toString()}`);
   }
@@ -135,6 +140,7 @@
       $('subtitle').textContent = `${new Date(iv.start).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })} – ${endShown.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}${SNAPSHOT ? ' · snapshot' : ''}`;
       main.hidden = false;
       render();
+      if (state.tab === 'escalations') loadEscalations();
     } catch (err) {
       if (seq !== loadSeq) return; // superseded by a newer load
       // Don't leave the previous org's or range's numbers on screen under the new selection.
@@ -205,6 +211,7 @@
     renderIntents(M.intentTable(state.filtered));
     renderBots(M.botTable(state.filtered));
     renderSessions();
+    if (state.tab === 'escalations') renderEscalations();
   }
 
   function renderKpis(s) {
@@ -470,6 +477,128 @@
     URL.revokeObjectURL(a.href);
   }
 
+  // ---------- Escalations: why sessions went to a person ----------
+  const isEscalated = (s) => (s.escalation === 'agent' || s.escalation === 'queue') && s.conversationId;
+  let escalationSeq = 0;
+
+  function setTab(tab) {
+    state.tab = tab;
+    document.querySelectorAll('.tab').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+    $('view-overview').hidden = tab !== 'overview';
+    $('view-escalations').hidden = tab !== 'escalations';
+    writeHash();
+    if (tab === 'escalations' && state.dataset) {
+      renderEscalations();
+      loadEscalations();
+    }
+  }
+
+  // The analysis is fetched once per org and dataset load, and only while the tab is open.
+  async function loadEscalations() {
+    const iv = state.dataset?.interval;
+    if (!iv) return;
+    const key = `${state.org}|${iv.start}|${iv.end}|${state.dataset.generatedAt}`;
+    if (state.escalations.key === key && (state.escalations.data || state.escalations.loading)) return;
+    const seq = ++escalationSeq;
+    state.escalations = { key, data: null, error: null, loading: true };
+    renderEscalations();
+    try {
+      const qs = new URLSearchParams({ start: iv.start, end: iv.end });
+      if (state.org) qs.set('org', state.org);
+      const res = await fetch(`api/escalations?${qs}`);
+      const body = await res.json();
+      if (seq !== escalationSeq) return;
+      if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+      state.escalations = { key, data: body, error: null, loading: false };
+    } catch (err) {
+      if (seq !== escalationSeq) return;
+      state.escalations = { key, data: null, error: err.message, loading: false };
+    }
+    renderEscalations();
+  }
+
+  // Escalated sessions under the current filters, each joined to its analysis.
+  function escalationRows() {
+    const byId = new Map((state.escalations.data?.rows || []).map((r) => [r.sessionId, r]));
+    return state.filtered.filter(isEscalated).map((s) => ({ s, a: byId.get(s.id) || null }));
+  }
+
+  function escalationFor(s) {
+    return state.escalations.data?.rows.find((r) => r.sessionId === s.id) || null;
+  }
+
+  function whyCell(a) {
+    if (!a) return '<span class="muted">Not analyzed (beyond the most recent sessions)</span>';
+    const cat = state.escalations.data?.categories.find((c) => c.key === a.category);
+    if (cat) return `<span class="chip why-chip">${esc(cat.label)}</span><div class="why-text">${esc(a.why)}</div>`;
+    if (a.genesysReason) return `<div class="why-text"><span class="muted">Genesys summary:</span> ${esc(a.genesysReason)}</div>`;
+    if (a.error) return `<span class="muted">Analysis failed: ${esc(a.error)}</span>`;
+    if (!a.hasTranscript && !a.genesysSummary) return '<span class="muted">No transcript or summary left in Genesys</span>';
+    return '<span class="muted">Not analyzed</span>';
+  }
+
+  function renderEscalations() {
+    if (!state.dataset || state.tab !== 'escalations') return;
+    const { data, error, loading } = state.escalations;
+    const all = escalationRows();
+    const analyzed = all.filter((r) => r.a?.category);
+    const why = state.filters.why;
+    const rows = why ? all.filter((r) => r.a?.category === why) : all;
+
+    const notes = [];
+    if (loading) notes.push('Reading transcripts and working out why each session was escalated. The first load of a date range can take a few minutes; results are saved, so later loads are quick.');
+    if (error) notes.push(`Couldn’t load the escalation analysis: ${esc(error)}`);
+    if (data && !data.analysisEnabled) notes.push('Why categories need an Anthropic API key: add <code>ANTHROPIC_API_KEY</code> to <code>.env</code> and restart the server. Until then, the list shows Genesys’s own summary reason where it has one.');
+    if (data?.analysisError) notes.push(`Claude couldn’t analyze the sessions: ${esc(data.analysisError)}. Check <code>ANTHROPIC_API_KEY</code> in <code>.env</code>.`);
+    if (data?.truncated) notes.push(`Only the ${num(data.rows.length)} most recent escalated sessions are analyzed; narrow the date range to see older ones.`);
+    $('esc-note').innerHTML = notes.map((n) => `<p>${n}</p>`).join('');
+    $('esc-note').hidden = !notes.length;
+
+    const askedByCustomer = analyzed.filter((r) => r.a.initiatedBy === 'customer').length;
+    $('esc-summary').textContent = `${num(all.length)} escalated session${all.length === 1 ? '' : 's'} in this view · ${num(analyzed.length)} analyzed${analyzed.length ? ` · the customer asked for a person in ${pct(askedByCustomer / analyzed.length)}` : ''}`;
+
+    const cats = data?.categories || [];
+    const counts = cats.map((c) => ({ key: c.key, label: c.label, count: analyzed.filter((r) => r.a.category === c.key).length })).filter((c) => c.count);
+    if (counts.length) renderBarList('esc-categories', counts, 'why');
+    else $('esc-categories').innerHTML = `<div class="empty-state">${loading ? 'Analyzing…' : 'No analyzed sessions for these filters.'}</div>`;
+    $('esc-definitions').innerHTML = cats.map((c) => `<dt>${esc(c.label)}</dt><dd>${esc(c.description)}</dd>`).join('');
+
+    $('esc-count').textContent = `(${num(rows.length)})`;
+    const shown = rows.slice(0, state.escalationLimit);
+    const el = $('escalations');
+    el.innerHTML = '<thead><tr><th>Started</th><th>Virtual agent</th><th>Went to</th><th>Why</th><th>Who asked</th></tr></thead><tbody>' +
+      (shown.length ? shown.map(({ s, a }) => `<tr data-id="${esc(s.id)}" tabindex="0">
+        <td>${esc(fmtDateTime(s.start))}</td>
+        <td><div class="cell-strong">${esc(s.botName)}</div>${M.intentPath(s).length ? `<div class="cell-sub">${esc(M.intentPath(s).join(' → '))}</div>` : ''}</td>
+        <td>${s.escalation === 'agent' ? 'Agent' : 'Queue only'}${s.queueName ? `<div class="cell-sub">${esc(s.queueName)}</div>` : ''}</td>
+        <td class="why-cell">${data ? whyCell(a) : '<span class="muted">…</span>'}</td>
+        <td>${a?.initiatedBy === 'customer' ? 'Customer' : a?.initiatedBy === 'virtual_agent' ? 'Virtual agent' : '<span class="muted">–</span>'}</td></tr>`).join('')
+        : '<tr class="empty"><td colspan="5">No escalated sessions match these filters.</td></tr>') + '</tbody>';
+    el.querySelectorAll('tbody tr[data-id]').forEach((tr) => {
+      const open = () => openSession(state.filtered.find((x) => x.id === tr.dataset.id));
+      tr.addEventListener('click', open);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
+    });
+    $('esc-more').hidden = rows.length <= shown.length;
+    $('esc-more').textContent = `Show all ${num(rows.length)}`;
+  }
+
+  function exportEscalationsCsv() {
+    const why = state.filters.why;
+    const rows = escalationRows().filter((r) => !why || r.a?.category === why);
+    const label = (k) => state.escalations.data?.categories.find((c) => c.key === k)?.label || '';
+    const header = ['Started', 'Virtual agent', 'Went to', 'Queue', 'Why category', 'Why', 'Who asked', 'Genesys summary reason', 'Intents (in order)', 'Conversation ID', 'Bot session ID'];
+    const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [header.map(cell).join(',')].concat(rows.map(({ s, a }) => [s.start, s.botName, s.escalation, s.queueName, label(a?.category), a?.why, a?.initiatedBy, a?.genesysReason, M.intentPath(s).join(' > '), s.conversationId, s.id].map(cell).join(',')));
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `ava-escalations-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }
+
+
   // ---------- Session drill-down ----------
   let lastFocus = null;
   async function openSession(s) {
@@ -598,6 +727,9 @@
       ['Questions self-served', s.queries ? `${num(s.selfServedQueries)} of ${num(s.queries)}` : '–'],
     ];
     if (s.queueName) facts.push(['Queue', esc(s.queueName), true]);
+    const escalation = escalationFor(s);
+    if (escalation?.category || escalation?.genesysReason) facts.push(['Why it was escalated', whyCell(escalation), true, true]);
+    if (escalation?.genesysSummary) facts.push(['Genesys summary', esc(escalation.genesysSummary), true, true]);
     if (detail?.conversationEnd && detail?.conversationStart) facts.push(['Whole conversation', fmtDuration(Date.parse(detail.conversationEnd) - Date.parse(detail.conversationStart))]);
     facts.push(['Conversation ID', `<span class="mono">${esc(s.conversationId || '–')}</span>`, true, true]);
     return `<section class="facts">${facts.map(([k, v, , wide]) => `<div class="fact${wide ? ' wide' : ''}"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`).join('')}</section>`;
@@ -678,6 +810,11 @@
       $('verify').hidden = true; // needs the live server
       $('export').hidden = true; // a static snapshot can't always start downloads
     }
+    if (SNAPSHOT) $('tabs').hidden = true; // escalation analysis needs the live server
+    document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
+    $('esc-more').addEventListener('click', () => { state.escalationLimit = Infinity; renderEscalations(); });
+    $('esc-export').addEventListener('click', exportEscalationsCsv);
+    setTab(state.tab);
     await loadOrgs();
     $('f-org').addEventListener('change', (e) => {
       // Bots, intents and queues differ between orgs, so start the new org unfiltered.

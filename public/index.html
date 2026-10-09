@@ -19,6 +19,11 @@
     </div>
   </header>
 
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Views">
+    <button type="button" class="tab" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button type="button" class="tab" role="tab" data-tab="escalations" aria-selected="false">Escalations</button>
+  </nav>
+
   <section class="filters" aria-label="Filters">
     <label class="field" id="org-field"><span>Genesys org</span><select id="f-org"></select></label>
     <label class="field">
@@ -72,6 +77,7 @@
   <div class="banner" id="banner" hidden></div>
 
   <main id="main">
+  <div id="view-overview">
     <section class="kpis" id="kpis" aria-label="Key metrics"></section>
 
     <section class="grid two">
@@ -135,6 +141,34 @@
         <dt>Recognition failure</dt><dd>Sessions with at least one no-match or no-input event.</dd>
       </dl>
     </section>
+  </div>
+
+  <div id="view-escalations" hidden>
+    <div class="banner esc-note" id="esc-note" hidden></div>
+    <section class="grid two">
+      <article class="card">
+        <header class="card-head">
+          <h2>Why sessions were escalated</h2>
+          <span class="muted small">Select a bar to filter</span>
+        </header>
+        <p class="muted small" id="esc-summary"></p>
+        <div id="esc-categories" class="bar-list"></div>
+      </article>
+      <article class="card definitions">
+        <h2>What each reason means</h2>
+        <dl id="esc-definitions"></dl>
+        <p class="muted small">Each escalated session’s bot transcript (with card numbers and PINs masked) is read by Claude, which picks the reason and writes a short explanation. When Genesys no longer has the transcript, its own AI summary of the conversation is used instead. Results are saved on the server, so a session is only analyzed once.</p>
+      </article>
+    </section>
+    <section class="card">
+      <header class="card-head">
+        <h2>Escalated sessions <span class="muted" id="esc-count"></span></h2>
+        <div class="card-actions"><button type="button" class="btn" id="esc-export">Export CSV</button></div>
+      </header>
+      <div class="table-wrap"><table class="data sessions" id="escalations"></table></div>
+      <button type="button" class="btn btn-ghost show-more" id="esc-more" hidden></button>
+    </section>
+  </div>
   </main>
 
   <div class="tooltip" id="tooltip" role="tooltip" hidden></div>

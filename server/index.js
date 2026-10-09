@@ -10,6 +10,7 @@ const { buildDataset } = require('./dataset');
 const { getSessionDetail } = require('./detail');
 const { getOrg, listOrgs } = require('./orgs');
 const { buildVerification } = require('./verify');
+const { buildEscalations } = require('./escalations');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -64,6 +65,19 @@ async function handleApi(req, res, url) {
     if (endMs - startMs > MAX_RANGE_DAYS * 86_400_000) return sendJson(res, 400, { error: `Date range is limited to ${MAX_RANGE_DAYS} days` });
     const key = `dataset:${org.key}:${new Date(startMs).toISOString()}:${new Date(endMs).toISOString()}`;
     return sendJson(res, 200, await cached(key, () => buildDataset(org.client, start, end)));
+  }
+
+  if (url.pathname === '/api/escalations') {
+    const start = url.searchParams.get('start');
+    const end = url.searchParams.get('end');
+    const startMs = Date.parse(start);
+    const endMs = Date.parse(end);
+    if (Number.isNaN(startMs) || Number.isNaN(endMs) || startMs >= endMs) return sendJson(res, 400, { error: 'start and end must be ISO timestamps with start before end' });
+    if (endMs - startMs > MAX_RANGE_DAYS * 86_400_000) return sendJson(res, 400, { error: `Date range is limited to ${MAX_RANGE_DAYS} days` });
+    const range = `${new Date(startMs).toISOString()}:${new Date(endMs).toISOString()}`;
+    // Shares the dataset cache entry with /api/dataset, so the session list and this view agree.
+    const dataset = await cached(`dataset:${org.key}:${range}`, () => buildDataset(org.client, start, end));
+    return sendJson(res, 200, await cached(`escalations:${org.key}:${range}`, () => buildEscalations(org.client, org.key, dataset)));
   }
 
   if (url.pathname === '/api/verify') {

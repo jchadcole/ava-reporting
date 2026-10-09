@@ -218,3 +218,15 @@ table.data .empty td { cursor: default; color: var(--muted); text-align: center;
 .check-ok { color: var(--good); white-space: nowrap; }
 .check-diff { color: var(--critical); white-space: nowrap; }
 .verify-note { color: var(--text-2); margin: 0; max-width: 65ch; }
+
+/* View tabs */
+.tabs { display: flex; gap: 4px; max-width: 1440px; margin: 0 auto; padding: 0 24px; }
+#view-overview, #view-escalations { display: flex; flex-direction: column; gap: 16px; }
+@media (max-width: 640px) { .tabs { padding: 0 16px; } }
+.tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 12px; font: inherit; font-weight: 500; color: var(--muted); cursor: pointer; margin-bottom: -1px; }
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--series-1); }
+.why-cell { min-width: 280px; max-width: 520px; }
+.why-text { margin-top: 4px; white-space: normal; line-height: 1.4; }
+.esc-note p { margin: 0; }
+.esc-note p + p { margin-top: 6px; }
