@@ -1,11 +1,11 @@
-// Dashboard UI. Loads one dataset of bot sessions per date range from the server
-// (or from window.AVA_SNAPSHOT in a static snapshot) and recomputes every panel
-// locally whenever a filter changes.
+// AVA dashboard (v2) UI. Loads the AVA sessions for a date range from the server and
+// recomputes every panel locally whenever a filter changes. While Claude is still reading
+// sessions, the page polls and fills in intents as they arrive.
 (function () {
   'use strict';
   const M = window.AvaMetrics;
-  const SNAPSHOT = window.AVA_SNAPSHOT || null;
   const PAGE_SIZE = 25;
+  const POLL_MS = 5000;
 
   const $ = (id) => document.getElementById(id);
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -21,49 +21,47 @@
     const m = Math.floor(s / 60);
     if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`;
     const h = Math.floor(m / 60);
-    if (h < 48) return `${h}h ${String(m % 60).padStart(2, '0')}m`;
-    return `${Math.round(h / 24)}d`;
+    return `${h}h ${String(m % 60).padStart(2, '0')}m`;
   }
 
-  const FILTER_IDS = { bot: 'f-bot', media: 'f-media', intent: 'f-intent', containment: 'f-containment', result: 'f-result', failure: 'f-failure', intentCount: 'f-intentcount', preview: 'f-preview' };
+  const FILTER_IDS = { agent: 'f-agent', media: 'f-media', intent: 'f-intent', verdict: 'f-verdict', intentVerdict: 'f-intentverdict', issues: 'f-issues', preview: 'f-preview' };
+  const ISSUE_LABEL = { error: 'Error', guardrail: 'Guardrail block', tool_failed: 'Tool failed', no_reply: 'No reply' };
 
   const state = {
     org: '',
     orgs: [],
-    range: '30',
+    range: '7',
     from: null,
     to: null,
-    filters: { bot: '', media: '', intent: '', intentCount: '', containment: '', result: '', failure: '', preview: '', search: '', why: '' },
-    tab: 'overview',
-    escalations: { key: null, data: null, error: null, loading: false },
-    escalationLimit: 100,
-    dataset: null,
+    filters: { agent: '', media: '', intent: '', verdict: '', intentVerdict: '', issues: '', preview: '', search: '' },
+    data: null,
     filtered: [],
     page: 1,
     sort: { key: 'start', dir: -1 },
     detailCache: new Map(),
-    expanded: { intents: false, bots: false },
+    expanded: { intents: false, agents: false },
   };
   const TABLE_PREVIEW_ROWS = 10;
+  const verdictLabel = (key) => state.data?.verdicts.find((v) => v.key === key)?.label || key;
 
-  // Long tables show their top rows plus a toggle; the active filter row always stays visible.
   function visibleRows(table, rows, isActive) {
     if (state.expanded[table] || rows.length <= TABLE_PREVIEW_ROWS) return rows;
     return rows.filter((r, i) => i < TABLE_PREVIEW_ROWS || isActive(r));
   }
 
   function renderShowMore(table, total) {
-    const el = $(table).closest('.card').querySelector('.show-more') || (() => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'btn btn-ghost show-more';
-      $(table).closest('.card').appendChild(b);
-      b.addEventListener('click', () => {
+    const card = $(table).closest('.card');
+    let el = card.querySelector('.show-more');
+    if (!el) {
+      el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'btn btn-ghost show-more';
+      card.appendChild(el);
+      el.addEventListener('click', () => {
         state.expanded[table] = !state.expanded[table];
         render();
       });
-      return b;
-    })();
+    }
     el.hidden = total <= TABLE_PREVIEW_ROWS;
     el.textContent = state.expanded[table] ? 'Show fewer' : `Show all ${total}`;
   }
@@ -75,20 +73,16 @@
     if (p.get('range')) state.range = p.get('range');
     if (p.get('from')) state.from = p.get('from');
     if (p.get('to')) state.to = p.get('to');
-    if (p.get('tab') === 'escalations' && !SNAPSHOT) state.tab = 'escalations';
     for (const k of Object.keys(state.filters)) if (p.get(k)) state.filters[k] = p.get(k);
   }
   function writeHash() {
     const p = new URLSearchParams();
-    if (!SNAPSHOT) {
-      if (state.org) p.set('org', state.org);
-      p.set('range', state.range);
-      if (state.range === 'custom') {
-        if (state.from) p.set('from', state.from);
-        if (state.to) p.set('to', state.to);
-      }
+    if (state.org) p.set('org', state.org);
+    p.set('range', state.range);
+    if (state.range === 'custom') {
+      if (state.from) p.set('from', state.from);
+      if (state.to) p.set('to', state.to);
     }
-    if (state.tab !== 'overview') p.set('tab', state.tab);
     for (const [k, v] of Object.entries(state.filters)) if (v) p.set(k, v);
     history.replaceState(null, '', `#${p.toString()}`);
   }
@@ -100,7 +94,7 @@
       end.setDate(end.getDate() + 1);
       return { start: start.toISOString(), end: end.toISOString() };
     }
-    const days = Number(state.range) || 30;
+    const days = Number(state.range) || 7;
     const end = new Date();
     const start = new Date(end.getTime() - days * 86_400_000);
     return { start: start.toISOString(), end: end.toISOString() };
@@ -109,44 +103,48 @@
   // ---------- Data loading ----------
   let loadSeq = 0;
   let loadAbort = null;
+  let pollTimer = null;
+  let interval = null; // the range being shown, reused by polls so they hit the server's cache
 
-  async function load() {
-    // Only the latest request may update the page: a slow earlier load (say 90 days)
-    // must not land after a quicker later one and show numbers for the wrong range.
+  async function load({ poll = false } = {}) {
+    // Only the latest request may update the page, so a slow earlier load can't land last.
     const seq = ++loadSeq;
+    clearTimeout(pollTimer);
     if (loadAbort) loadAbort.abort();
-    loadAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    loadAbort = new AbortController();
     const main = $('main');
-    main.classList.add('loading');
-    showBanner('');
+    if (!poll) {
+      interval = currentInterval();
+      main.classList.add('loading');
+      showBanner('');
+    }
     try {
-      if (SNAPSHOT) {
-        state.dataset = SNAPSHOT.dataset;
-      } else {
-        const { start, end } = currentInterval();
-        const qs = new URLSearchParams({ start, end });
-        if (state.org) qs.set('org', state.org);
-        const res = await fetch(`api/dataset?${qs}`, { signal: loadAbort?.signal });
-        const body = await res.json();
-        if (seq !== loadSeq) return;
-        if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
-        state.dataset = body;
-      }
-      const meta = state.dataset.meta || {};
-      if (meta.detailsTruncated) showBanner(`Conversation detail was capped at ${num(meta.conversationsWithDetails)} conversations, so containment for older sessions is estimated from the bot outcome. Narrow the date range for exact numbers.`);
-      $('updated').textContent = `Updated ${fmtDateTime(state.dataset.generatedAt)}`;
-      const iv = state.dataset.interval;
+      const qs = new URLSearchParams(interval);
+      if (state.org) qs.set('org', state.org);
+      const res = await fetch(`api/ava?${qs}`, { signal: loadAbort.signal });
+      const body = await res.json();
+      if (seq !== loadSeq) return;
+      if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+      state.data = body;
+      if (body.meta?.turnsTruncated) showBanner('Some virtual agents had more turns than the page limit, so their oldest sessions in this range are missing. Narrow the date range to see them all.');
+      $('updated').textContent = `Updated ${fmtDateTime(body.generatedAt)}`;
+      const iv = body.interval;
       const endShown = new Date(new Date(iv.end).getTime() - 1);
-      $('subtitle').textContent = `${new Date(iv.start).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })} – ${endShown.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}${SNAPSHOT ? ' · snapshot' : ''}`;
+      $('subtitle').textContent = `${new Date(iv.start).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })} – ${endShown.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`;
       main.hidden = false;
       render();
-      if (state.tab === 'escalations') loadEscalations();
+      renderProgress();
+      if (body.analysis.pending) pollTimer = setTimeout(() => load({ poll: true }), POLL_MS);
     } catch (err) {
-      if (seq !== loadSeq) return; // superseded by a newer load
-      // Don't leave the previous org's or range's numbers on screen under the new selection.
-      state.dataset = null;
+      if (seq !== loadSeq || err.name === 'AbortError') return;
+      if (poll) {
+        pollTimer = setTimeout(() => load({ poll: true }), POLL_MS * 2);
+        return;
+      }
+      state.data = null;
       main.hidden = true;
       $('updated').textContent = '';
+      $('progress').hidden = true;
       showBanner(`Couldn’t load data: ${err.message}`, true);
     } finally {
       if (seq === loadSeq) main.classList.remove('loading');
@@ -160,72 +158,66 @@
     b.classList.toggle('error', !!isError);
   }
 
+  function renderProgress() {
+    const a = state.data.analysis;
+    const el = $('progress');
+    let text = '';
+    if (!a.enabled) text = 'Intents and response verdicts need Claude: add ANTHROPIC_API_KEY to .env and restart the server. Until then the sessions show only Genesys’s own flags.';
+    else if (a.error) text = `Claude analysis stopped: ${a.error}`;
+    else if (a.pending) text = `Claude is reading AVA transcripts: ${num(a.analyzed)} of ${num(a.withRequests)} sessions done. The page updates as they finish.`;
+    else if (a.analyzed < a.withRequests) text = `Claude has read ${num(a.analyzed)} of ${num(a.withRequests)} sessions with a customer request (up to ${num(a.limit)} per load, newest first). Refresh to continue.`;
+    el.hidden = !text;
+    el.textContent = text;
+    el.classList.toggle('error', !!a.error);
+  }
+
   function fillSelect(id, allLabel, items, selected) {
     const sel = $(id);
-    const values = items.map((i) => (typeof i === 'string' ? { value: i, label: i } : i));
-    // Keep a selected value visible even if this date range has no data for it.
-    if (selected && !values.some((v) => v.value === selected)) values.unshift({ value: selected, label: selected });
-    sel.innerHTML = `<option value="">${esc(allLabel)}</option>` + values.map((v) => `<option value="${esc(v.value)}">${esc(v.label)}</option>`).join('');
+    const values = items.slice();
+    if (selected && !values.includes(selected)) values.unshift(selected);
+    sel.innerHTML = `<option value="">${esc(allLabel)}</option>` + values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
     sel.value = selected || '';
   }
 
-  function populateOptions() {
-    const optionsWithout = (key) => M.options(M.applyFilters(state.dataset.sessions, filterSpec(key)));
-    fillSelect('f-bot', 'All virtual agents', optionsWithout('bot').bots.map((b) => ({ value: b.id, label: b.name })), state.filters.bot);
-    fillSelect('f-media', 'All channels', optionsWithout('media').media, state.filters.media);
-    fillSelect('f-intent', 'All intents', optionsWithout('intent').intents, state.filters.intent);
-    fillSelect('f-result', 'All exit reasons', optionsWithout('result').results.map((r) => ({ value: r.code, label: r.label })), state.filters.result);
-  }
-
-  // Filters as metrics.applyFilters expects them; `except` leaves one out, which is how
-  // each dropdown lists only the values that still match the other active filters.
   function filterSpec(except) {
     const f = { ...state.filters };
     if (except) f[except] = '';
-    return {
-      botIds: f.bot ? [f.bot] : null,
-      media: f.media,
-      intent: f.intent,
-      intentCount: f.intentCount,
-      containment: f.containment,
-      botResult: f.result,
-      recognitionFailure: f.failure,
-      preview: f.preview || 'exclude', // preview (test) sessions are hidden unless asked for
-      search: f.search,
-    };
+    return { ...f, preview: f.preview || 'exclude' };
+  }
+
+  function populateOptions() {
+    const optionsWithout = (key) => M.options(M.applyFilters(state.data.sessions, filterSpec(key)));
+    fillSelect('f-agent', 'All AVAs', optionsWithout('agent').agents, state.filters.agent);
+    fillSelect('f-media', 'All channels', optionsWithout('media').media, state.filters.media);
+    fillSelect('f-intent', 'All intents', optionsWithout('intent').intents, state.filters.intent);
   }
 
   // ---------- Rendering ----------
   function render() {
-    if (!state.dataset) return;
-    const f = state.filters;
+    if (!state.data) return;
     populateOptions();
-    state.filtered = M.applyFilters(state.dataset.sessions, filterSpec());
-    for (const [k, id] of Object.entries(FILTER_IDS)) $(id).value = f[k];
-    $('f-search').value = f.search;
+    state.filtered = M.applyFilters(state.data.sessions, filterSpec());
+    for (const [k, id] of Object.entries(FILTER_IDS)) $(id).value = state.filters[k];
+    $('f-search').value = state.filters.search;
     writeHash();
     renderKpis(M.summarize(state.filtered));
-    renderTrend(M.byDay(state.filtered, state.dataset.interval.start, state.dataset.interval.end));
-    renderBarList('results', M.byResult(state.filtered), 'result', (key) => key || '');
-    renderBarList('failures', M.byFailureReason(state.filtered), null);
     renderIntents(M.intentTable(state.filtered));
-    renderBots(M.botTable(state.filtered));
+    renderVerdicts(M.summarize(state.filtered).intentVerdicts);
+    renderAgents(M.agentTable(state.filtered));
     renderSessions();
-    if (state.tab === 'escalations') renderEscalations();
+    renderDefinitions();
   }
 
   function renderKpis(s) {
     const tiles = [
-      { label: 'Bot sessions', value: num(s.sessions), sub: `${num(s.contained)} contained · ${num(s.escalated)} escalated` },
-      { label: 'Containment rate', value: pct(s.containmentRate, 1), meter: s.containmentRate, sub: s.inferred ? `${num(s.inferred)} estimated from bot outcome` : 'Never reached a queue or agent' },
-      { label: 'Reached an agent', value: pct(s.agentRate, 1), meter: s.agentRate, sub: `${num(s.reachedAgent)} sessions` },
-      { label: 'Query self-service rate', value: pct(s.selfServiceRate, 1), meter: s.selfServiceRate, sub: `${num(s.queries)} questions asked` },
-      { label: 'Intent recognized', value: pct(s.intentRate, 1), meter: s.intentRate, sub: s.multiIntent ? `${num(s.multiIntent)} session${s.multiIntent > 1 ? 's' : ''} matched more than one` : 'Sessions matching ≥1 intent' },
-      { label: 'Recognition failures', value: pct(s.recognitionFailureRate, 1), meter: s.recognitionFailureRate, sub: 'Sessions with no-match / no-input' },
-      { label: 'Turns per session', value: num(s.avgTurns, 1), sub: 'Average' },
-      { label: 'Session length', value: fmtDuration(s.medianDurationMs), sub: 'Median' },
-      { label: 'Bot response time', value: fmtMs(s.medianResponseMs), sub: s.responseTurns ? `Median of ${num(s.responseTurns)} turns in ${num(s.timedSessions)} of ${num(s.sessions)} sessions` : 'No turn timing reported' },
-      { label: 'Longest response', value: fmtMs(s.maxResponseMs), sub: 'Slowest single bot reply' },
+      { label: 'AVA sessions', value: num(s.sessions), sub: `${num(s.analyzed)} read by Claude` },
+      { label: 'Valid response to all intents', value: pct(s.allValidRate, 1), meter: s.allValidRate, sub: s.scored ? `${num(s.allValid)} of ${num(s.scored)} sessions` : 'No analyzed sessions yet' },
+      { label: 'Intents with a valid response', value: pct(s.validIntentRate, 1), meter: s.validIntentRate, sub: `${num(s.intentVerdicts.valid)} of ${num(s.judgedIntents)} intents` },
+      { label: 'Intents detected', value: num(s.intents), sub: s.intentsPerSession != null ? `${num(s.intentsPerSession, 1)} per session · ${num(s.multiIntent)} with more than one` : '–' },
+      { label: 'Tool call success', value: pct(s.toolSuccessRate, 1), meter: s.toolSuccessRate, sub: `${num(s.toolCalls)} calls · ${num(s.toolFailures)} failed` },
+      { label: 'Guardrail blocks', value: num(s.guardrails), sub: `${num(s.errors)} errors or missing replies` },
+      { label: 'Asked for a person', value: num(s.agentRequested), sub: 'Sessions where the customer asked the AVA for an agent' },
+      { label: 'AVA reply time', value: fmtMs(s.medianResponseMs), sub: s.responseTurns ? `Median of ${num(s.responseTurns)} turns` : 'No turn timing reported' },
     ];
     $('kpis').innerHTML = tiles
       .map((t) => `<div class="kpi"><div class="kpi-label">${esc(t.label)}</div><div class="kpi-value">${esc(t.value)}</div>` +
@@ -234,154 +226,53 @@
       .join('');
   }
 
-  // Stacked daily bars: contained (series 1) under escalated (series 2), 2px surface gap.
-  function renderTrend(days) {
-    const series = [
-      { key: 'contained', label: 'Contained', color: 'var(--series-1)' },
-      { key: 'escalated', label: 'Escalated', color: 'var(--series-2)' },
-    ];
-    if (days.some((d) => d.unknown)) series.push({ key: 'unknown', label: 'Unknown', color: 'var(--series-unknown)' });
-    $('trend-legend').innerHTML = series.map((s) => `<span class="legend-item"><span class="swatch" style="background:${s.color}"></span>${esc(s.label)}</span>`).join('');
+  const rateCell = (v) => `<td class="num"><span class="rate">${pct(v)}<span class="rate-bar"><span style="width:${v == null ? 0 : (v * 100).toFixed(1)}%"></span></span></span></td>`;
 
-    const W = 720, H = 240, padL = 36, padR = 8, padT = 8, padB = 24;
-    const innerW = W - padL - padR, innerH = H - padT - padB;
-    const totals = days.map((d) => series.reduce((a, s) => a + d[s.key], 0));
-    const maxRaw = Math.max(1, ...totals);
-    const step = niceStep(maxRaw / 4);
-    const max = Math.ceil(maxRaw / step) * step;
-    const y = (v) => padT + innerH - (v / max) * innerH;
-    const band = innerW / Math.max(1, days.length);
-    const barW = Math.max(2, Math.min(28, band * 0.7));
-    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Sessions per day, contained versus escalated">`;
-    for (let v = 0; v <= max; v += step) {
-      svg += `<line class="${v === 0 ? 'baseline' : 'gridline'}" x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/>`;
-      svg += `<text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
-    }
-    const labelEvery = Math.ceil(days.length / 8);
-    days.forEach((d, i) => {
-      const x = padL + i * band + (band - barW) / 2;
-      let acc = 0;
-      const segs = series.filter((s) => d[s.key] > 0);
-      segs.forEach((s, j) => {
-        const top = y(acc + d[s.key]);
-        const bottom = y(acc);
-        const gap = j > 0 ? 2 : 0;
-        const h = Math.max(0, bottom - top - gap);
-        const isTop = j === segs.length - 1;
-        const r = isTop ? Math.min(4, barW / 2, h) : 0;
-        svg += `<path d="${roundedTopRect(x, top, barW, h, r)}" fill="${s.color}"/>`;
-        acc += d[s.key];
-      });
-      if (i % labelEvery === 0) {
-        const dt = new Date(`${d.day}T00:00:00`);
-        svg += `<text x="${x + barW / 2}" y="${H - 6}" text-anchor="middle">${esc(dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }))}</text>`;
-      }
-      svg += `<rect class="hit" data-i="${i}" x="${padL + i * band}" y="${padT}" width="${band}" height="${innerH}"/>`;
-    });
-    svg += '</svg>';
-    const el = $('trend');
-    el.innerHTML = svg;
-    el.querySelectorAll('.hit').forEach((hit) => {
-      const d = days[Number(hit.dataset.i)];
-      const total = series.reduce((a, s) => a + d[s.key], 0);
-      const rate = d.contained + d.escalated ? d.contained / (d.contained + d.escalated) : null;
-      hit.addEventListener('mousemove', (e) => showTooltip(e, new Date(`${d.day}T00:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }),
-        [...series.map((s) => [s.label, num(d[s.key]), s.color]), ['Total', num(total)], ['Containment', pct(rate, 1)]]));
-      hit.addEventListener('mouseleave', hideTooltip);
-    });
+  function renderIntents(rows) {
+    const el = $('intents');
+    el.innerHTML = `<thead><tr><th>Intent</th><th class="num">Sessions</th><th class="num">Valid response</th><th class="num">Valid</th><th class="num">Partly valid</th><th class="num">Not valid</th><th class="num" title="The customer left before the AVA could respond">Customer left</th></tr></thead><tbody>` +
+      (rows.length ? visibleRows('intents', rows, (r) => r.intent === state.filters.intent).map((r) => `<tr data-key="${esc(r.intent)}" class="${state.filters.intent === r.intent ? 'active' : ''}" tabindex="0">
+        <td class="cell-strong">${esc(r.intent)}</td><td class="num">${num(r.sessions)}</td>${rateCell(r.validRate)}
+        <td class="num">${num(r.valid)}</td><td class="num">${r.partial ? `<span class="v-partial">${num(r.partial)}</span>` : '0'}</td><td class="num">${r.not_valid ? `<span class="v-not_valid">${num(r.not_valid)}</span>` : '0'}</td><td class="num">${num(r.no_chance)}</td></tr>`).join('')
+        : `<tr class="empty"><td colspan="7">${state.data.analysis.enabled ? 'No intents in these sessions yet.' : 'Intents appear once Claude analysis is turned on.'}</td></tr>`) + '</tbody>';
+    bindRowFilter(el, 'intent');
+    renderShowMore('intents', rows.length);
   }
 
-  function roundedTopRect(x, y, w, h, r) {
-    if (h <= 0) return '';
-    return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`;
-  }
-
-  function niceStep(raw) {
-    const pow = 10 ** Math.floor(Math.log10(Math.max(raw, 1)));
-    for (const m of [1, 2, 5, 10]) if (m * pow >= raw) return Math.max(1, m * pow);
-    return Math.max(1, 10 * pow);
-  }
-
-  function showTooltip(e, title, rows) {
-    const tt = $('tooltip');
-    tt.innerHTML = `<div class="tt-title">${esc(title)}</div>` + rows.map(([k, v, color]) =>
-      `<div class="tt-row"><span>${color ? `<span class="swatch" style="background:${color}"></span>` : ''}${esc(k)}</span><span>${esc(v)}</span></div>`).join('');
-    tt.hidden = false;
-    const pad = 14;
-    const rect = tt.getBoundingClientRect();
-    let left = e.clientX + pad;
-    if (left + rect.width > window.innerWidth - 8) left = e.clientX - rect.width - pad;
-    let top = e.clientY + pad;
-    if (top + rect.height > window.innerHeight - 8) top = e.clientY - rect.height - pad;
-    tt.style.left = `${Math.max(8, left)}px`;
-    tt.style.top = `${Math.max(8, top)}px`;
-  }
-  const hideTooltip = () => { $('tooltip').hidden = true; };
-
-  function renderBarList(id, rows, filterKey) {
-    const el = $(id);
-    if (!rows.length) {
-      el.innerHTML = '<div class="empty-state">No data for these filters.</div>';
+  function renderVerdicts(t) {
+    const rows = state.data.verdicts.map((v) => ({ key: v.key, label: v.label, count: t[v.key] || 0 }));
+    const total = rows.reduce((a, r) => a + r.count, 0);
+    const el = $('verdicts');
+    if (!total) {
+      el.innerHTML = '<div class="empty-state">No analyzed intents for these filters.</div>';
       return;
     }
-    const total = rows.reduce((a, r) => a + r.count, 0);
     const max = Math.max(...rows.map((r) => r.count));
-    el.innerHTML = rows.slice(0, 10).map((r) => {
-      const active = filterKey && (state.filters[filterKey] || '') === (r.key || '') && state.filters[filterKey];
-      return `<div class="bar-row${active ? ' active' : ''}" data-key="${esc(r.key || '')}" ${filterKey && r.key ? 'tabindex="0" role="button"' : 'style="cursor:default"'}>
-        <span class="bar-label" title="${esc(r.label)}">${esc(r.label)}</span>
+    el.innerHTML = rows.map((r) => {
+      const active = state.filters.intentVerdict === r.key;
+      const clickable = r.key !== 'no_chance';
+      return `<div class="bar-row${active ? ' active' : ''}" data-key="${esc(r.key)}" ${clickable ? 'tabindex="0" role="button"' : 'style="cursor:default"'}>
+        <span class="bar-label">${esc(r.label)}</span>
         <span class="bar-value">${num(r.count)} · ${pct(r.count / total)}</span>
-        <div class="bar-track"><div class="bar-fill" style="width:${((r.count / max) * 100).toFixed(1)}%"></div></div>
+        <div class="bar-track"><div class="bar-fill v-bg-${esc(r.key)}" style="width:${((r.count / max) * 100).toFixed(1)}%"></div></div>
       </div>`;
     }).join('');
-    if (!filterKey) return;
     el.querySelectorAll('.bar-row[role=button]').forEach((row) => {
-      const toggle = () => setFilter(filterKey, state.filters[filterKey] === row.dataset.key ? '' : row.dataset.key);
+      const toggle = () => setFilter('intentVerdict', state.filters.intentVerdict === row.dataset.key ? '' : row.dataset.key);
       row.addEventListener('click', toggle);
       row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
     });
   }
 
-  const rateCell = (v) => `<td class="num"><span class="rate">${pct(v)}<span class="rate-bar"><span style="width:${v == null ? 0 : (v * 100).toFixed(1)}%"></span></span></span></td>`;
-
-  // A session's intents in the order they were recognized ("A → B → A"); without turn data
-  // the order is unknown, so they're shown as plain chips.
-  function intentChips(s) {
-    const path = M.intentPath(s);
-    if (!path.length) return '<span class="muted">–</span>';
-    const ordered = s.intentPath || [];
-    const extra = path.slice(ordered.length);
-    const chip = (i) => `<span class="chip">${esc(i)}</span>`;
-    const arrow = '<span class="path-arrow" aria-hidden="true">→</span>';
-    return `<div class="chips intent-path">${ordered.map(chip).join(arrow)}${extra.map(chip).join('')}</div>`;
-  }
-
-  function intentText(s) {
-    const ordered = s.intentPath || [];
-    const extra = M.intentPath(s).slice(ordered.length);
-    return [ordered.map(esc).join(' → '), extra.map(esc).join(', ')].filter(Boolean).join(', ') || '–';
-  }
-
-  function renderIntents(rows) {
-    const el = $('intents');
-    el.innerHTML = `<thead><tr><th>Intent</th><th class="num">Sessions</th><th class="num" title="Times the intent was recognized, counting repeats within a session">Matches</th><th class="num">Share</th><th class="num">Contained</th><th class="num">Reached agent</th><th class="num">Avg turns</th><th class="num">Recog. failures</th><th class="num">Final intent</th></tr></thead><tbody>` +
-      (rows.length ? visibleRows('intents', rows, (r) => r.intent === state.filters.intent).map((r) => `<tr data-key="${esc(r.intent)}" class="${state.filters.intent === r.intent ? 'active' : ''}" tabindex="0">
-        <td class="cell-strong">${esc(r.intent)}</td><td class="num">${num(r.sessions)}</td><td class="num">${num(r.matches)}</td><td class="num">${pct(r.share)}</td>${rateCell(r.containmentRate)}<td class="num">${pct(r.agentRate)}</td>
-        <td class="num">${num(r.avgTurns, 1)}</td><td class="num">${pct(r.recognitionFailureRate)}</td><td class="num">${num(r.asFinal)}</td></tr>`).join('')
-        : '<tr class="empty"><td colspan="9">No intents were recognized in these sessions.</td></tr>') + '</tbody>';
-    bindRowFilter(el, 'intent');
-    renderShowMore('intents', rows.length);
-  }
-
-  function renderBots(rows) {
-    const el = $('bots');
-    el.innerHTML = `<thead><tr><th>Virtual agent</th><th>Channel</th><th class="num">Sessions</th><th class="num">Contained</th><th class="num">Reached agent</th><th class="num">Self-service</th><th class="num">Intent recognized</th><th class="num">Recog. failures</th><th class="num">Avg turns</th><th class="num">Median length</th><th class="num">Median response</th><th class="num">Longest response</th></tr></thead><tbody>` +
-      (rows.length ? visibleRows('bots', rows, (r) => r.botId === state.filters.bot).map((r) => `<tr data-key="${esc(r.botId)}" class="${state.filters.bot === r.botId ? 'active' : ''}" tabindex="0">
-        <td class="cell-strong">${esc(r.botName)}</td><td>${esc(r.media)}</td><td class="num">${num(r.sessions)}</td>${rateCell(r.containmentRate)}<td class="num">${pct(r.agentRate)}</td>
-        <td class="num">${pct(r.selfServiceRate)}</td><td class="num">${pct(r.intentRate)}</td><td class="num">${pct(r.recognitionFailureRate)}</td><td class="num">${num(r.avgTurns, 1)}</td><td class="num">${fmtDuration(r.medianDurationMs)}</td><td class="num">${fmtMs(r.medianResponseMs)}</td><td class="num">${fmtMs(r.maxResponseMs)}</td></tr>`).join('')
-        : '<tr class="empty"><td colspan="12">No sessions match these filters.</td></tr>') + '</tbody>';
-    bindRowFilter(el, 'bot');
-    renderShowMore('bots', rows.length);
+  function renderAgents(rows) {
+    const el = $('agents');
+    el.innerHTML = `<thead><tr><th>AVA</th><th>Versions</th><th>Channel</th><th class="num">Sessions</th><th class="num">Valid to all intents</th><th class="num">Intents valid</th><th class="num">Intents / session</th><th class="num">Tool calls</th><th class="num">Tool failures</th><th class="num">Guardrail blocks</th><th class="num">Median reply</th></tr></thead><tbody>` +
+      (rows.length ? visibleRows('agents', rows, (r) => r.agentName === state.filters.agent).map((r) => `<tr data-key="${esc(r.agentName)}" class="${state.filters.agent === r.agentName ? 'active' : ''}" tabindex="0">
+        <td class="cell-strong">${esc(r.agentName)}</td><td>${esc(r.versions.map((v) => `v${v}`).join(', '))}</td><td>${esc(r.media)}</td><td class="num">${num(r.sessions)}</td>${rateCell(r.allValidRate)}<td class="num">${pct(r.validIntentRate)}</td>
+        <td class="num">${num(r.intentsPerSession, 1)}</td><td class="num">${num(r.toolCalls)}</td><td class="num">${num(r.toolFailures)}</td><td class="num">${num(r.guardrails)}</td><td class="num">${fmtMs(r.medianResponseMs)}</td></tr>`).join('')
+        : '<tr class="empty"><td colspan="11">No AVA sessions match these filters.</td></tr>') + '</tbody>';
+    bindRowFilter(el, 'agent');
+    renderShowMore('agents', rows.length);
   }
 
   function bindRowFilter(table, key) {
@@ -392,20 +283,20 @@
     });
   }
 
+  const VERDICT_ORDER = ['not_all_valid', 'all_valid', 'customer_left', 'no_request', 'pending', 'not_analyzed'];
   const SESSION_COLUMNS = [
     { key: 'start', label: 'Started', value: (s) => s.start || '' },
-    { key: 'botName', label: 'Virtual agent', value: (s) => s.botName || '' },
+    { key: 'agentName', label: 'AVA', value: (s) => s.agentName || '' },
     { key: 'media', label: 'Channel', value: (s) => s.media || '' },
-    { key: 'containment', label: 'Outcome', value: (s) => M.containment(s) },
-    { key: 'botResult', label: 'Bot exit', value: (s) => M.resultLabel(s.botResult) },
-    { key: 'intents', label: 'Intents', value: (s) => M.intentPath(s).join(' > ') },
-    { key: 'turns', label: 'Turns', value: (s) => s.turns, num: true },
-    { key: 'durationMs', label: 'Length', value: (s) => s.durationMs ?? -1, num: true },
-    { key: 'response', label: 'Response (median · max)', value: (s) => M.sessionResponse(s).maxResponseMs ?? -1, num: true },
+    { key: 'intents', label: 'Intents detected', value: (s) => M.intents(s).map((i) => i.name).join(' > ') },
+    { key: 'verdict', label: 'Valid response to all?', value: (s) => VERDICT_ORDER.indexOf(M.sessionVerdict(s)), num: true },
+    { key: 'customerTurns', label: 'Customer turns', value: (s) => s.customerTurns, num: true },
+    { key: 'toolCalls', label: 'Tools', value: (s) => s.toolCalls, num: true },
+    { key: 'issues', label: 'Genesys flags', value: (s) => M.issueCount(s), num: true },
   ];
 
-  function searchedSessions() {
-    const rows = state.filtered.slice(); // search is already applied with the other filters
+  function sortedSessions() {
+    const rows = state.filtered.slice();
     const col = SESSION_COLUMNS.find((c) => c.key === state.sort.key) || SESSION_COLUMNS[0];
     rows.sort((a, b) => {
       const va = col.value(a), vb = col.value(b);
@@ -414,19 +305,26 @@
     return rows;
   }
 
-  function outcomeBadge(s) {
-    const c = M.containment(s);
-    const label = c === 'contained' ? 'Contained' : c === 'escalated' ? (s.escalation === 'agent' ? 'Escalated · agent' : s.escalation === 'queue' ? 'Escalated · queue' : 'Escalated') : 'Unknown';
-    return `<span class="badge ${c}">${label}${s.escalation == null && c !== 'unknown' ? ' <span class="est">(est.)</span>' : ''}</span>`;
+  const verdictChip = (i) => `<span class="chip v-${esc(i.verdict)}" title="${esc(`${verdictLabel(i.verdict)}: ${i.why}`)}">${esc(i.name)}</span>`;
+
+  function intentChips(s) {
+    const list = M.intents(s);
+    if (!list.length) return '<span class="muted">–</span>';
+    return `<div class="chips">${list.map(verdictChip).join('')}</div>`;
   }
 
-  function responseCell(s) {
-    const r = M.sessionResponse(s);
-    return r.responseTurns ? `${fmtMs(r.medianResponseMs)} · <span class="cell-strong">${fmtMs(r.maxResponseMs)}</span>` : '<span class="muted">–</span>';
+  function verdictBadge(s) {
+    const v = M.sessionVerdict(s);
+    const cls = v === 'all_valid' ? 'yes' : v === 'not_all_valid' ? 'no' : 'unknown';
+    return `<span class="badge ${cls}">${esc(M.SESSION_VERDICT_LABEL[v])}</span>`;
+  }
+
+  function issuesText(s) {
+    return Object.entries(s.issues || {}).filter(([, n]) => n).map(([k, n]) => `${ISSUE_LABEL[k]}${n > 1 ? ` ×${n}` : ''}`).join(', ');
   }
 
   function renderSessions() {
-    const rows = searchedSessions();
+    const rows = sortedSessions();
     const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
     state.page = Math.min(state.page, pages);
     const pageRows = rows.slice((state.page - 1) * PAGE_SIZE, state.page * PAGE_SIZE);
@@ -435,19 +333,18 @@
     const el = $('sessions');
     el.innerHTML = `<thead><tr>${SESSION_COLUMNS.map((c) => `<th data-sort="${c.key}" class="${c.num ? 'num' : ''}">${c.label}${arrow(c.key)}</th>`).join('')}</tr></thead><tbody>` +
       (pageRows.length ? pageRows.map((s) => `<tr data-id="${esc(s.id)}" tabindex="0">
-        <td><div>${esc(fmtDateTime(s.start))}</div></td>
-        <td><div class="cell-strong">${esc(s.botName)}</div>${s.preview ? '<div class="cell-sub">Preview test</div>' : ''}</td>
+        <td>${esc(fmtDateTime(s.start))}</td>
+        <td><div class="cell-strong">${esc(s.agentName)}</div><div class="cell-sub">${esc(s.botName)}${s.preview ? ' · Preview test' : ''}</div></td>
         <td>${esc(s.media || '')}</td>
-        <td>${outcomeBadge(s)}${s.queueName && s.escalation ? `<div class="cell-sub">${esc(s.queueName)}</div>` : ''}</td>
-        <td>${esc(M.resultLabel(s.botResult))}${s.recognitionFailures ? `<div class="cell-sub">${s.recognitionFailures} recognition failure${s.recognitionFailures > 1 ? 's' : ''}</div>` : ''}</td>
         <td>${intentChips(s)}</td>
-        <td class="num">${num(s.turns)}</td>
-        <td class="num">${fmtDuration(s.durationMs)}</td>
-        <td class="num">${responseCell(s)}</td></tr>`).join('')
-        : '<tr class="empty"><td colspan="9">No sessions match these filters.</td></tr>') + '</tbody>';
+        <td class="num">${verdictBadge(s)}</td>
+        <td class="num">${num(s.customerTurns)}</td>
+        <td class="num">${num(s.toolCalls)}</td>
+        <td class="num">${M.issueCount(s) ? `<span class="v-not_valid" title="${esc(issuesText(s))}">${num(M.issueCount(s))}</span>` : '<span class="muted">0</span>'}</td></tr>`).join('')
+        : '<tr class="empty"><td colspan="8">No AVA sessions match these filters.</td></tr>') + '</tbody>';
     el.querySelectorAll('th[data-sort]').forEach((th) => th.addEventListener('click', () => {
       const k = th.dataset.sort;
-      state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : ['start', 'turns', 'durationMs', 'response'].includes(k) ? -1 : 1 };
+      state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : ['start', 'customerTurns', 'toolCalls', 'issues'].includes(k) ? -1 : 1 };
       renderSessions();
     }));
     el.querySelectorAll('tbody tr[data-id]').forEach((tr) => {
@@ -464,11 +361,19 @@
     }));
   }
 
+  function renderDefinitions() {
+    $('verdict-defs').innerHTML = `Claude judges the AVA’s handling of each intent from the transcript and the signals Genesys recorded on each turn (tool calls and their status, guardrail blocks, errors):<ul>${state.data.verdicts.map((v) => `<li><b>${esc(v.label)}</b>: ${esc(v.description)}</li>`).join('')}</ul>Hover over an intent in the session list to see why it got its verdict.`;
+  }
+
   function exportCsv() {
-    const rows = searchedSessions();
-    const header = ['Started', 'Virtual agent', 'Bot ID', 'Channel', 'Outcome', 'Escalation', 'Queue', 'Bot exit', 'Intents (in order)', 'Final intent', 'Recognition failures', 'Turns', 'Length (s)', 'Median response (ms)', 'Longest response (ms)', 'Conversation ID', 'Bot session ID', 'Preview'];
+    const rows = sortedSessions();
+    const header = ['Started', 'AVA', 'AVA versions', 'Bot flow', 'Channel', 'Intents (in order)', 'Intent verdicts', 'Valid response to all intents', 'Customer turns', 'Tool calls', 'Genesys flags', 'Conversation ID', 'Bot session ID', 'Preview'];
     const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const lines = [header.map(cell).join(',')].concat(rows.map((s) => [s.start, s.botName, s.botId, s.media, M.containment(s), s.escalation ?? 'estimated', s.queueName, M.resultLabel(s.botResult), M.intentPath(s).join(' > '), s.finalIntent, s.recognitionFailures, s.turns, s.durationMs == null ? '' : Math.round(s.durationMs / 1000), M.sessionResponse(s).medianResponseMs ?? '', M.sessionResponse(s).maxResponseMs ?? '', s.conversationId, s.id, s.preview ? 'yes' : 'no'].map(cell).join(',')));
+    const lines = [header.map(cell).join(',')].concat(rows.map((s) => [
+      s.start, s.agentName, (s.agents || []).map((a) => a.version).join(' '), s.botName, s.media,
+      M.intents(s).map((i) => i.name).join(' > '), M.intents(s).map((i) => `${i.name}: ${verdictLabel(i.verdict)}`).join('; '),
+      M.SESSION_VERDICT_LABEL[M.sessionVerdict(s)], s.customerTurns, s.toolCalls, issuesText(s), s.conversationId, s.id, s.preview ? 'yes' : 'no',
+    ].map(cell).join(',')));
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -476,156 +381,6 @@
     a.click();
     URL.revokeObjectURL(a.href);
   }
-
-  // ---------- Escalations: why sessions went to a person ----------
-  const isEscalated = (s) => (s.escalation === 'agent' || s.escalation === 'queue') && s.conversationId;
-  let escalationSeq = 0;
-
-  function setTab(tab) {
-    state.tab = tab;
-    document.querySelectorAll('.tab').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
-    $('view-overview').hidden = tab !== 'overview';
-    $('view-escalations').hidden = tab !== 'escalations';
-    writeHash();
-    if (tab === 'escalations' && state.dataset) {
-      renderEscalations();
-      loadEscalations();
-    }
-  }
-
-  // The analysis is fetched once per org and dataset load, and only while the tab is open.
-  async function loadEscalations() {
-    const iv = state.dataset?.interval;
-    if (!iv) return;
-    const key = `${state.org}|${iv.start}|${iv.end}|${state.dataset.generatedAt}`;
-    if (state.escalations.key === key && (state.escalations.data || state.escalations.loading)) return;
-    const seq = ++escalationSeq;
-    state.escalations = { key, data: null, error: null, loading: true };
-    renderEscalations();
-    try {
-      const qs = new URLSearchParams({ start: iv.start, end: iv.end });
-      if (state.org) qs.set('org', state.org);
-      const res = await fetch(`api/escalations?${qs}`);
-      const body = await res.json();
-      if (seq !== escalationSeq) return;
-      if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
-      state.escalations = { key, data: body, error: null, loading: false };
-    } catch (err) {
-      if (seq !== escalationSeq) return;
-      state.escalations = { key, data: null, error: err.message, loading: false };
-    }
-    renderEscalations();
-  }
-
-  // Escalated sessions under the current filters, each joined to its analysis.
-  function escalationRows() {
-    const byId = new Map((state.escalations.data?.rows || []).map((r) => [r.sessionId, r]));
-    return state.filtered.filter(isEscalated).map((s) => ({ s, a: byId.get(s.id) || null }));
-  }
-
-  function escalationFor(s) {
-    return state.escalations.data?.rows.find((r) => r.sessionId === s.id) || null;
-  }
-
-  function whyCell(a) {
-    if (!a) return '<span class="muted">Not analyzed (beyond the most recent sessions)</span>';
-    const cat = state.escalations.data?.categories.find((c) => c.key === a.category);
-    if (cat) return `<span class="chip why-chip">${esc(cat.label)}</span><div class="why-text">${esc(a.why)}</div>`;
-    if (a.genesysReason) return `<div class="why-text"><span class="muted">Genesys summary:</span> ${esc(a.genesysReason)}</div>`;
-    if (a.error) return `<span class="muted">Analysis failed: ${esc(a.error)}</span>`;
-    if (!a.hasTranscript && !a.genesysSummary) return '<span class="muted">No transcript or summary left in Genesys</span>';
-    return '<span class="muted">Not analyzed</span>';
-  }
-
-  // Pie of reason shares. Each reason keeps its colour whatever the filters, slices and
-  // legend rows both filter the list, and the legend carries the exact count and share.
-  function renderPie(id, rows, order, filterKey) {
-    rows = [...rows].sort((a, b) => b.count - a.count);
-    const total = rows.reduce((a, r) => a + r.count, 0);
-    const active = state.filters[filterKey];
-    const color = (key) => `var(--cat-${order.indexOf(key) + 1})`;
-    const R = 100;
-    let angle = -Math.PI / 2;
-    const point = (a) => `${(R + R * Math.cos(a)).toFixed(2)} ${(R + R * Math.sin(a)).toFixed(2)}`;
-    const slices = rows.map((r) => {
-      const sweep = (r.count / total) * Math.PI * 2;
-      const d = rows.length === 1
-        ? `M ${R} 0 A ${R} ${R} 0 1 1 ${R - 0.01} 0 Z`
-        : `M ${R} ${R} L ${point(angle)} A ${R} ${R} 0 ${sweep > Math.PI ? 1 : 0} 1 ${point(angle + sweep)} Z`;
-      angle += sweep;
-      return `<path d="${d}" fill="${color(r.key)}" data-key="${esc(r.key)}" tabindex="0" role="button" class="${active && active !== r.key ? 'dim' : ''}" aria-label="${esc(r.label)}: ${num(r.count)} (${pct(r.count / total)})"><title>${esc(r.label)}: ${num(r.count)} · ${pct(r.count / total)}</title></path>`;
-    }).join('');
-    $(id).innerHTML = `<div class="pie-wrap"><svg class="pie" viewBox="0 0 200 200" role="img" aria-label="Share of escalations by reason">${slices}</svg>
-      <ul class="pie-legend">${rows.map((r) => `<li data-key="${esc(r.key)}" tabindex="0" role="button" class="${active === r.key ? 'active' : active ? 'dim' : ''}">
-        <span class="swatch" style="background:${color(r.key)}"></span><span>${esc(r.label)}</span><span class="val"><b>${pct(r.count / total)}</b> · ${num(r.count)}</span></li>`).join('')}</ul></div>`;
-    $(id).querySelectorAll('[data-key]').forEach((el) => {
-      const toggle = () => setFilter(filterKey, state.filters[filterKey] === el.dataset.key ? '' : el.dataset.key);
-      el.addEventListener('click', toggle);
-      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
-    });
-  }
-
-  function renderEscalations() {
-    if (!state.dataset || state.tab !== 'escalations') return;
-    const { data, error, loading } = state.escalations;
-    const all = escalationRows();
-    const analyzed = all.filter((r) => r.a?.category);
-    const why = state.filters.why;
-    const rows = why ? all.filter((r) => r.a?.category === why) : all;
-
-    const notes = [];
-    if (loading) notes.push('Reading transcripts and working out why each session was escalated. The first load of a date range can take a few minutes; results are saved, so later loads are quick.');
-    if (error) notes.push(`Couldn’t load the escalation analysis: ${esc(error)}`);
-    if (data && !data.analysisEnabled) notes.push('Why categories need an Anthropic API key: add <code>ANTHROPIC_API_KEY</code> to <code>.env</code> and restart the server. Until then, the list shows Genesys’s own summary reason where it has one.');
-    if (data?.analysisError) notes.push(`Claude couldn’t analyze the sessions: ${esc(data.analysisError)}. Check <code>ANTHROPIC_API_KEY</code> in <code>.env</code>.`);
-    if (data?.truncated) notes.push(`Only the ${num(data.rows.length)} most recent escalated sessions are analyzed; narrow the date range to see older ones.`);
-    $('esc-note').innerHTML = notes.map((n) => `<p>${n}</p>`).join('');
-    $('esc-note').hidden = !notes.length;
-
-    const askedByCustomer = analyzed.filter((r) => r.a.initiatedBy === 'customer').length;
-    $('esc-summary').textContent = `${num(all.length)} escalated session${all.length === 1 ? '' : 's'} in this view · ${num(analyzed.length)} analyzed${analyzed.length ? ` · the customer asked for a person in ${pct(askedByCustomer / analyzed.length)}` : ''}`;
-
-    const cats = data?.categories || [];
-    const counts = cats.map((c) => ({ key: c.key, label: c.label, count: analyzed.filter((r) => r.a.category === c.key).length })).filter((c) => c.count);
-    if (counts.length) renderPie('esc-categories', counts, cats.map((c) => c.key), 'why');
-    else $('esc-categories').innerHTML = `<div class="empty-state">${loading ? 'Analyzing…' : 'No analyzed sessions for these filters.'}</div>`;
-    $('esc-definitions').innerHTML = cats.map((c) => `<dt>${esc(c.label)}</dt><dd>${esc(c.description)}</dd>`).join('');
-
-    $('esc-count').textContent = `(${num(rows.length)})`;
-    const shown = rows.slice(0, state.escalationLimit);
-    const el = $('escalations');
-    el.innerHTML = '<thead><tr><th>Started</th><th>Virtual agent</th><th>Went to</th><th>Why</th><th>Who asked</th></tr></thead><tbody>' +
-      (shown.length ? shown.map(({ s, a }) => `<tr data-id="${esc(s.id)}" tabindex="0">
-        <td>${esc(fmtDateTime(s.start))}</td>
-        <td><div class="cell-strong">${esc(s.botName)}</div>${M.intentPath(s).length ? `<div class="cell-sub">${esc(M.intentPath(s).join(' → '))}</div>` : ''}</td>
-        <td>${s.escalation === 'agent' ? 'Agent' : 'Queue only'}${s.queueName ? `<div class="cell-sub">${esc(s.queueName)}</div>` : ''}</td>
-        <td class="why-cell">${data ? whyCell(a) : '<span class="muted">…</span>'}</td>
-        <td>${a?.initiatedBy === 'customer' ? 'Customer' : a?.initiatedBy === 'virtual_agent' ? 'Virtual agent' : '<span class="muted">–</span>'}</td></tr>`).join('')
-        : '<tr class="empty"><td colspan="5">No escalated sessions match these filters.</td></tr>') + '</tbody>';
-    el.querySelectorAll('tbody tr[data-id]').forEach((tr) => {
-      const open = () => openSession(state.filtered.find((x) => x.id === tr.dataset.id));
-      tr.addEventListener('click', open);
-      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') open(); });
-    });
-    $('esc-more').hidden = rows.length <= shown.length;
-    $('esc-more').textContent = `Show all ${num(rows.length)}`;
-  }
-
-  function exportEscalationsCsv() {
-    const why = state.filters.why;
-    const rows = escalationRows().filter((r) => !why || r.a?.category === why);
-    const label = (k) => state.escalations.data?.categories.find((c) => c.key === k)?.label || '';
-    const header = ['Started', 'Virtual agent', 'Went to', 'Queue', 'Why category', 'Why', 'Who asked', 'Genesys summary reason', 'Intents (in order)', 'Conversation ID', 'Bot session ID'];
-    const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
-    const lines = [header.map(cell).join(',')].concat(rows.map(({ s, a }) => [s.start, s.botName, s.escalation, s.queueName, label(a?.category), a?.why, a?.initiatedBy, a?.genesysReason, M.intentPath(s).join(' > '), s.conversationId, s.id].map(cell).join(',')));
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `ava-escalations-${new Date().toISOString().slice(0, 10)}.csv`;
-    link.click();
-    URL.revokeObjectURL(link.href);
-  }
-
 
   // ---------- Session drill-down ----------
   let lastFocus = null;
@@ -635,166 +390,82 @@
     const drawer = $('drawer');
     drawer.classList.add('open');
     drawer.setAttribute('aria-hidden', 'false');
-    $('drawer-title').textContent = s.botName;
-    $('drawer-sub').textContent = `${fmtDateTime(s.start)} · ${s.media || ''}`;
+    drawer.dataset.session = s.id;
+    $('drawer-title').textContent = s.agentName || 'AVA session';
+    $('drawer-sub').textContent = `${fmtDateTime(s.start)} · ${s.media || ''} · ${s.botName}`;
     $('drawer-close').focus();
     const body = $('drawer-body');
-    body.innerHTML = factsHtml(s) + '<section><h3>Conversation path</h3><div class="empty-state">Loading…</div></section>';
-    let detail = state.detailCache.get(s.id);
+    body.innerHTML = factsHtml(s) + intentsHtml(s) + '<section><h3>AVA transcript</h3><div class="empty-state">Loading…</div></section>';
     try {
+      let detail = state.detailCache.get(s.id);
       if (!detail) {
-        if (SNAPSHOT) {
-          detail = SNAPSHOT.details?.[s.id] || null;
-        } else {
-          const qs = new URLSearchParams({ conversationId: s.conversationId || '', botId: s.botId || '', sessionId: s.id });
-          if (state.org) qs.set('org', state.org);
-          const res = await fetch(`api/session?${qs}`);
-          const json = await res.json();
-          if (!res.ok) throw new Error(json.error || `Request failed (${res.status})`);
-          detail = json;
-        }
-        if (detail) state.detailCache.set(s.id, detail);
+        const qs = new URLSearchParams({ botId: s.botId, sessionId: s.id });
+        if (state.org) qs.set('org', state.org);
+        const res = await fetch(`api/ava/session?${qs}`);
+        detail = await res.json();
+        if (!res.ok) throw new Error(detail.error || `Request failed (${res.status})`);
+        state.detailCache.set(s.id, detail);
       }
-      if (!drawer.classList.contains('open') || $('drawer-title').textContent !== s.botName) return;
-      body.innerHTML = factsHtml(s, detail) + (detail ? journeyHtml(detail) + transcriptHtml(detail) : '<section><div class="empty-state">Turn-by-turn detail isn’t included in this snapshot for this session. The live dashboard loads it on demand.</div></section>');
+      if (drawer.dataset.session !== s.id) return;
+      body.innerHTML = factsHtml(s) + intentsHtml(s) + transcriptHtml(detail);
     } catch (err) {
-      body.innerHTML = factsHtml(s) + `<section><div class="empty-state">Couldn’t load session detail: ${esc(err.message)}</div></section>`;
+      if (drawer.dataset.session !== s.id) return;
+      body.innerHTML = factsHtml(s) + intentsHtml(s) + `<section><div class="empty-state">Couldn’t load the transcript: ${esc(err.message)}</div></section>`;
     }
-  }
-
-  // ---------- Check against Genesys ----------
-  const VERIFY_ROWS = [
-    ['sessions', 'Bot sessions', 'nBotSessions'],
-    ['turns', 'Bot turns', 'nBotSessionTurns'],
-    ['exits', 'Sessions that exited the bot', 'tBotExit count'],
-    ['disconnects', 'Sessions that disconnected in the bot', 'tBotDisconnect count'],
-    ['recognitionFailures', 'Recognition failures', 'tBotRecognitionFailure count'],
-    ['queries', 'Customer questions', 'oBotSessionQuery sum'],
-    ['selfServedQueries', 'Questions self-served', 'oBotSessionQuerySelfServed sum'],
-    ['conversations', 'Conversations with a bot', 'Conversation detail search, bot participant'],
-    ['conversationsWithAgent', 'Conversations that reached an agent', 'Conversation detail search, bot and connected agent'],
-  ];
-
-  async function openVerify() {
-    if (!state.dataset) return;
-    lastFocus = document.activeElement;
-    const drawer = $('drawer');
-    drawer.classList.add('open');
-    drawer.setAttribute('aria-hidden', 'false');
-    const bot = state.filters.bot;
-    const botName = bot ? state.dataset.sessions.find((s) => s.botId === bot)?.botName : null;
-    $('drawer-title').textContent = 'Check against Genesys';
-    $('drawer-sub').textContent = `${$('subtitle').textContent}${botName ? ` · ${botName}` : ' · all virtual agents'}`;
-    $('drawer-close').focus();
-    const body = $('drawer-body');
-    body.innerHTML = '<div class="empty-state">Asking Genesys for its own totals…</div>';
-    try {
-      const qs = new URLSearchParams({ start: state.dataset.interval.start, end: state.dataset.interval.end });
-      if (state.org) qs.set('org', state.org);
-      if (bot) qs.set('bot', bot);
-      const preview = state.filters.preview || 'exclude';
-      qs.set('preview', preview);
-      const res = await fetch(`api/verify?${qs}`);
-      const genesys = await res.json();
-      if (!res.ok) throw new Error(genesys.error || `Request failed (${res.status})`);
-      if ($('drawer-title').textContent !== 'Check against Genesys') return;
-      const mine = M.verificationTotals(M.applyFilters(state.dataset.sessions, { botIds: bot ? [bot] : null, preview }));
-      body.innerHTML = verifyHtml(mine, genesys, !!bot);
-    } catch (err) {
-      body.innerHTML = `<div class="empty-state">Couldn’t get Genesys totals: ${esc(err.message)}</div>`;
-    }
-  }
-
-  function checkCell(a, b) {
-    if (a == null || b == null) return '<td class="muted">–</td>';
-    const d = a - b;
-    return d === 0 ? '<td class="check-ok">✓ Match</td>' : `<td class="check-diff">⚠ ${d > 0 ? '+' : ''}${num(d)}</td>`;
-  }
-
-  function verifyHtml(mine, genesys, oneBot) {
-    const rows = VERIFY_ROWS.filter(([k]) => genesys.totals[k] != null);
-    const diffs = rows.filter(([k]) => mine.totals[k] !== genesys.totals[k]).length;
-    const intents = Object.keys({ ...mine.intentSessions, ...genesys.intentSessions })
-      .map((i) => [i, mine.intentSessions[i] || 0, genesys.intentSessions[i] || 0])
-      .sort((a, b) => b[2] - a[2] || b[1] - a[1]);
-    const intentDiffs = intents.filter(([, a, b]) => a !== b).length;
-    return `<section class="verify-note">
-        <p class="verify-note">Genesys’s numbers below come from separate queries to its own analytics, for the same org and time range${oneBot ? ' and virtual agent' : ''}. Only the virtual agent and preview session filters apply here; other filters are ignored. ${diffs || intentDiffs ? `${diffs + intentDiffs} row${diffs + intentDiffs > 1 ? 's differ' : ' differs'}; see the notes below.` : 'Every row matches.'}</p>
-      </section>
-      <section><h3>Totals</h3><div class="table-wrap"><table class="data"><thead><tr><th>Measure</th><th class="num">Dashboard</th><th class="num">Genesys</th><th>Check</th></tr></thead><tbody>
-        ${rows.map(([k, label, source]) => `<tr style="cursor:default"><td><div class="cell-strong">${esc(label)}</div><div class="cell-sub">${esc(source)}</div></td><td class="num">${num(mine.totals[k])}</td><td class="num">${num(genesys.totals[k])}</td>${checkCell(mine.totals[k], genesys.totals[k])}</tr>`).join('')}
-      </tbody></table></div></section>
-      <section><h3>Sessions per intent</h3><div class="table-wrap"><table class="data"><thead><tr><th>Intent</th><th class="num">Dashboard</th><th class="num">Genesys</th><th>Check</th></tr></thead><tbody>
-        ${intents.length ? intents.map(([i, a, b]) => `<tr style="cursor:default"><td>${esc(i)}</td><td class="num">${num(a)}</td><td class="num">${num(b)}</td>${checkCell(a, b)}</tr>`).join('') : '<tr class="empty"><td colspan="4">No intents in this range.</td></tr>'}
-      </tbody></table></div></section>
-      <section><h3>Why a row can differ</h3><ul class="verify-note">
-        <li><b>Conversations with a bot</b>: third-party bots don’t appear as a bot participant in conversation detail, so their conversations count on the dashboard but not in Genesys’s search.</li>
-        <li>Survey bots (${esc(genesys.excludedBotTypes.join(', ') || 'none')}) are left out on both sides.</li>
-        <li>Data still arriving: Genesys finishes some sessions minutes after they end. Press Refresh and check again.</li>
-        <li>To check a single session, copy its conversation ID from the session list and search for it in Genesys under Performance › Workspace › Interactions.</li>
-      </ul></section>`;
   }
 
   function closeDrawer() {
     const drawer = $('drawer');
     drawer.classList.remove('open');
     drawer.setAttribute('aria-hidden', 'true');
+    delete drawer.dataset.session;
     if (lastFocus) lastFocus.focus();
   }
 
-  function factsHtml(s, detail) {
+  function factsHtml(s) {
     const facts = [
-      ['Outcome', outcomeBadge(s), true],
-      ['Bot exit', esc(M.resultLabel(s.botResult)), true],
-      ['Turns', num(s.turns)],
-      ['Bot session length', fmtDuration(s.durationMs)],
-      ['Bot response (median · longest)', M.sessionResponse(s).responseTurns ? `${fmtMs(M.sessionResponse(s).medianResponseMs)} · ${fmtMs(M.sessionResponse(s).maxResponseMs)}` : '–'],
-      ['Intents', intentText(s), true],
-      ['Final intent', esc(s.finalIntent || '–'), true],
-      ['Recognition failures', s.recognitionFailures ? `${s.recognitionFailures} (${s.recognitionFailureReasons.map((r) => esc(M.failureLabel(r))).join(', ')})` : '0', true],
-      ['Questions self-served', s.queries ? `${num(s.selfServedQueries)} of ${num(s.queries)}` : '–'],
+      ['Valid response to all intents', verdictBadge(s)],
+      ['AVA versions', esc((s.agents || []).map((a) => `v${a.version}`).join(', ') || '–')],
+      ['Customer turns', num(s.customerTurns)],
+      ['AVA session length', fmtDuration(s.start && s.end ? Date.parse(s.end) - Date.parse(s.start) : null)],
+      ['Tool calls', `${num(s.toolCalls)}${s.issues?.tool_failed ? ` (${num(s.issues.tool_failed)} failed)` : ''}`],
+      ['Median reply time', fmtMs(M.median(s.responseTimesMs || []))],
+      ['Genesys flags', esc(issuesText(s) || 'None'), true],
+      ['How the AVA ended', esc(s.endReason || 'Still in the AVA at the last turn, or ended by the flow'), true],
+      ['Conversation ID', `<span class="mono">${esc(s.conversationId || '–')}</span>`, true],
     ];
-    if (s.queueName) facts.push(['Queue', esc(s.queueName), true]);
-    const escalation = escalationFor(s);
-    if (escalation?.category || escalation?.genesysReason) facts.push(['Why it was escalated', whyCell(escalation), true, true]);
-    if (escalation?.genesysSummary) facts.push(['Genesys summary', esc(escalation.genesysSummary), true, true]);
-    if (detail?.conversationEnd && detail?.conversationStart) facts.push(['Whole conversation', fmtDuration(Date.parse(detail.conversationEnd) - Date.parse(detail.conversationStart))]);
-    facts.push(['Conversation ID', `<span class="mono">${esc(s.conversationId || '–')}</span>`, true, true]);
-    return `<section class="facts">${facts.map(([k, v, , wide]) => `<div class="fact${wide ? ' wide' : ''}"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`).join('')}</section>`;
+    return `<section class="facts">${facts.map(([k, v, wide]) => `<div class="fact${wide ? ' wide' : ''}"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`).join('')}</section>`;
   }
 
-  function journeyHtml(d) {
-    const steps = d.journey.filter((j) => j.role !== 'Customer');
-    if (!steps.length) return '<section><h3>Conversation path</h3><div class="empty-state">Genesys returned no conversation detail.</div></section>';
-    return `<section><h3>Conversation path</h3><ol class="journey">${steps.map((j) => {
-      const cls = j.role === 'Bot' ? 'bot' : j.role === 'Agent' ? 'agent' : j.role === 'Queue' ? 'queue' : '';
-      const meta = [j.exitReason && `Exit: ${j.exitReason}`, j.transferTarget && `Transfer to ${j.transferTarget}`, j.disconnectType && `Disconnect: ${j.disconnectType}`].filter(Boolean).join(' · ');
-      return `<li class="${cls}"><div><div class="j-role">${esc(j.role)}</div><div class="j-name">${esc(j.name || j.role)}</div>${meta ? `<div class="j-meta">${esc(meta)}</div>` : ''}</div><div class="j-time">${esc(fmtTime(j.start))}<br>${esc(fmtDuration(j.durationMs))}</div></li>`;
-    }).join('')}</ol></section>`;
+  function intentsHtml(s) {
+    const list = M.intents(s);
+    let inner;
+    if (s.customerTurns === 0) inner = '<div class="empty-state">The customer never said anything to the AVA.</div>';
+    else if (!s.analysis) inner = `<div class="empty-state">${s.pending ? 'Claude is reading this session now.' : state.data.analysis.enabled ? 'Not analyzed yet. Refresh to continue the analysis.' : 'Turn on Claude analysis to list intents.'}</div>`;
+    else if (s.analysis.refused) inner = '<div class="empty-state">Claude declined to analyze this conversation.</div>';
+    else if (!list.length) inner = '<div class="empty-state">Claude found no customer request in this session.</div>';
+    else inner = `<ol class="intent-list">${list.map((i) => `<li><div class="intent-head"><span class="cell-strong">${esc(i.name)}</span><span class="chip v-${esc(i.verdict)}">${esc(verdictLabel(i.verdict))}</span></div><div class="cell-sub">Customer: ${esc(i.customerAsked)}</div><div class="why-text">${esc(i.why)}</div></li>`).join('')}</ol>`;
+    return `<section><h3>Intents detected${list.length ? ` (${list.length})` : ''}</h3>${inner}</section>`;
   }
 
   function transcriptHtml(d) {
-    if (!d.turns.length) return '<section><h3>Transcript</h3><div class="empty-state">Genesys has no turn-level data for this session. Some digital and third-party bots don’t report turns.</div></section>';
-    const va = d.turns.find((t) => t.virtualAgent)?.virtualAgent;
+    if (!d.turns.length) return '<section><h3>AVA transcript</h3><div class="empty-state">Genesys no longer has turn data for this session.</div></section>';
     const html = d.turns.map((t) => {
       const userMeta = [];
-      if (t.intent) userMeta.push(`<span class="chip">Intent: ${esc(t.intent.name)} (${pct(t.intent.confidence)})</span>`);
-      for (const sl of t.slots) userMeta.push(`<span class="chip">${esc(sl.name)} = ${esc(sl.value)}</span>`);
-      if (t.result) userMeta.push(`<span class="chip ${/Success/.test(t.result) ? 'ok' : /NoMatch|NoInput|Error|Failure/.test(t.result) ? 'fail' : ''}">${esc(t.result.replace(/([a-z])([A-Z])/g, '$1 $2'))}</span>`);
+      if (t.result && t.result !== 'SuccessCollection') userMeta.push(`<span class="chip ${/Error|Guardrail/.test(t.result) ? 'fail' : ''}">${esc(t.result.replace(/([a-z])([A-Z])/g, '$1 $2'))}</span>`);
       const botMeta = [];
       if (t.responseMs != null) botMeta.push(`<span class="chip">Replied in ${esc(fmtMs(t.responseMs))}</span>`);
-      if (t.action) botMeta.push(`<span class="chip">${esc(t.action.name)}</span>`);
       for (const c of t.toolCalls) botMeta.push(`<span class="chip ${c.status === 'Success' ? 'ok' : 'fail'}">Tool ${esc(c.name)} · ${esc(c.status)}${c.latencyMs != null ? ` · ${c.latencyMs} ms` : ''}</span>`);
       if (t.guardrailEvents) botMeta.push(`<span class="chip fail">${t.guardrailEvents} guardrail event${t.guardrailEvents > 1 ? 's' : ''}</span>`);
       return `<div class="turn">
         ${t.userInput ? `<div class="bubble user">${esc(t.userInput)}</div>` : ''}
-        ${userMeta.length && t.userInput ? `<div class="turn-meta user">${userMeta.join('')}</div>` : ''}
+        ${userMeta.length ? `<div class="turn-meta user">${userMeta.join('')}</div>` : ''}
         ${t.botPrompts.map((p) => `<div class="bubble bot">${esc(p)}</div>`).join('')}
-        ${botMeta.length ? `<div class="turn-meta"><span>${esc(fmtTime(t.time))}</span>${botMeta.join('')}</div>` : `<div class="turn-meta"><span>${esc(fmtTime(t.time))}</span></div>`}
-        ${t.sessionEnd ? `<div class="session-end">Session ended · ${esc(t.sessionEnd)}</div>` : ''}
+        <div class="turn-meta"><span>${esc(fmtTime(t.time))}</span>${botMeta.join('')}</div>
+        ${t.sessionEnd ? `<div class="session-end">AVA session ended · ${esc(t.sessionEnd)}</div>` : ''}
       </div>`;
     }).join('');
-    return `<section><h3>Transcript${va ? ` · ${esc(va.name)} v${esc(va.version)}` : ''}</h3><div class="transcript">${html}</div></section>`;
+    return `<section><h3>AVA transcript</h3><div class="transcript">${html}</div></section>`;
   }
 
   // ---------- Events ----------
@@ -806,12 +477,6 @@
 
   async function loadOrgs() {
     const sel = $('f-org');
-    if (SNAPSHOT) {
-      const label = SNAPSHOT.dataset.org?.label || 'Snapshot';
-      sel.innerHTML = `<option>${esc(label)}</option>`;
-      sel.disabled = true;
-      return;
-    }
     try {
       const res = await fetch('api/orgs');
       const body = await res.json();
@@ -827,38 +492,25 @@
 
   async function init() {
     readHash();
+    if (![...$('f-range').options].some((o) => o.value === state.range)) state.range = '7';
     $('f-range').value = state.range;
     $('f-from').value = state.from || '';
     $('f-to').value = state.to || '';
     document.querySelectorAll('.custom-range').forEach((el) => { el.hidden = state.range !== 'custom'; });
-    if (SNAPSHOT) {
-      $('f-range').disabled = true;
-      $('f-range').innerHTML = '<option>Snapshot range</option>';
-      $('refresh').hidden = true;
-      $('verify').hidden = true; // needs the live server
-      $('export').hidden = true; // a static snapshot can't always start downloads
-    }
-    if (SNAPSHOT) $('tabs').hidden = true; // escalation analysis needs the live server
-    document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
-    $('esc-more').addEventListener('click', () => { state.escalationLimit = Infinity; renderEscalations(); });
-    $('esc-export').addEventListener('click', exportEscalationsCsv);
-    setTab(state.tab);
     await loadOrgs();
     $('f-org').addEventListener('change', (e) => {
-      // Bots, intents and queues differ between orgs, so start the new org unfiltered.
+      // AVAs and intents differ between orgs, so start the new org unfiltered.
       state.org = e.target.value;
       for (const k of Object.keys(state.filters)) state.filters[k] = '';
       state.detailCache.clear();
       state.page = 1;
       load();
     });
-
     $('f-range').addEventListener('change', (e) => {
       state.range = e.target.value;
       document.querySelectorAll('.custom-range').forEach((el) => { el.hidden = state.range !== 'custom'; });
       if (state.range === 'custom') {
-        const iv = currentInterval();
-        state.from = state.from || M.localDay(iv.start);
+        state.from = state.from || M.localDay(currentInterval().start);
         state.to = state.to || M.localDay(new Date());
         $('f-from').value = state.from;
         $('f-to').value = state.to;
@@ -881,9 +533,8 @@
       state.page = 1;
       render();
     });
-    $('refresh').addEventListener('click', load);
+    $('refresh').addEventListener('click', () => load());
     $('export').addEventListener('click', exportCsv);
-    $('verify').addEventListener('click', openVerify);
     $('drawer-close').addEventListener('click', closeDrawer);
     $('drawer').addEventListener('click', (e) => { if (e.target === $('drawer')) closeDrawer(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('drawer').classList.contains('open')) closeDrawer(); });

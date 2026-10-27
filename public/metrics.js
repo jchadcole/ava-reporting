@@ -1,272 +1,178 @@
-// Pure reporting logic over bot-session rows. Loaded as a classic script in the browser
-// (window.AvaMetrics) and with require() in tests.
+// Metric calculations for the AVA dashboard (v2). Pure functions over AVA session rows, so the
+// same code runs in the browser and in Node tests.
 (function (root) {
   'use strict';
 
-  const RESULT_LABELS = {
-    ExitRequestedByBot: 'Bot handed back to the flow',
-    ExitRequestedByUser: 'Customer asked to leave the bot',
-    ExitAgentRequestedByUser: 'Customer asked for an agent',
-    ExitRecognitionFailure: 'Exited after recognition failures',
-    ExitError: 'Exited on an error',
-    DisconnectRequestedByUser: 'Customer disconnected',
-    DisconnectRequestedByBot: 'Bot ended the conversation',
-    DisconnectSessionExpired: 'Session expired',
-    DisconnectError: 'Disconnected on an error',
+  // ---------- Per session ----------
+  const intents = (s) => s.analysis?.intents || [];
+  // Intents the AVA had a chance to answer (the customer didn't leave first).
+  const judged = (s) => intents(s).filter((i) => i.verdict !== 'no_chance');
+
+  // Did the AVA give a valid response to every intent in the session?
+  //   all_valid / not_all_valid: Claude listed the intents and judged each one
+  //   customer_left: every intent was cut off before the AVA could answer
+  //   no_request: the customer never asked for anything
+  //   pending / not_analyzed: no analysis yet
+  function sessionVerdict(s) {
+    if (s.customerTurns === 0) return 'no_request';
+    if (!s.analysis) return s.pending ? 'pending' : 'not_analyzed';
+    if (!intents(s).length) return 'no_request';
+    const j = judged(s);
+    if (!j.length) return 'customer_left';
+    return j.every((i) => i.verdict === 'valid') ? 'all_valid' : 'not_all_valid';
+  }
+
+  const SESSION_VERDICT_LABEL = {
+    all_valid: 'Yes',
+    not_all_valid: 'No',
+    customer_left: 'Customer left first',
+    no_request: 'No request',
+    pending: 'Being analyzed',
+    not_analyzed: 'Not analyzed',
   };
 
-  const FAILURE_LABELS = {
-    NoMatchCollection: 'No match (didn’t understand)',
-    NoInputCollection: 'No input (silence / no reply)',
-    NoMatchConfirmation: 'No match on confirmation',
-    NoInputConfirmation: 'No input on confirmation',
-  };
+  const issueCount = (s) => Object.values(s.issues || {}).reduce((a, b) => a + b, 0);
 
-  function humanize(code) {
-    return code ? code.replace(/([a-z])([A-Z])/g, '$1 $2') : 'Unknown';
+  function median(values) {
+    if (!values.length) return null;
+    const v = values.slice().sort((a, b) => a - b);
+    const mid = v.length >> 1;
+    return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
   }
-  const resultLabel = (code) => (code ? RESULT_LABELS[code] || humanize(code) : 'Still active / not reported');
-  const failureLabel = (code) => FAILURE_LABELS[code] || humanize(code);
+  const ratio = (a, b) => (b ? a / b : null);
 
-  // Contained = the conversation never reached a queue or agent after the bot.
-  // When conversation details are missing we fall back to the bot's own outcome:
-  // a disconnect inside the bot counts as contained, an exit back to the flow as escalated.
-  function containment(s) {
-    if (s.escalation === 'agent' || s.escalation === 'queue') return 'escalated';
-    if (s.escalation === 'none') return 'contained';
-    if (s.outcome === 'disconnect') return 'contained';
-    if (s.outcome === 'exit') return 'escalated';
-    return 'unknown';
-  }
-
-  // Every intent recognized in a session: the turn-by-turn path first (in order, with repeats),
-  // then any intent Genesys's session aggregates add that the turns don't name. The two sources
-  // don't always agree (the aggregates can miss an intent from a looping bot's earlier pass, and
-  // only they record knowledge matches), so the union is the complete list.
-  function intentPath(s) {
-    const path = s.intentPath || [];
-    return path.concat(s.intents.filter((i) => !path.includes(i)));
-  }
-
-  // Distinct intents in a session, including the final intent.
-  function sessionIntents(s) {
-    return [...new Set(intentPath(s).concat(s.finalIntent ? [s.finalIntent] : []))];
-  }
-
-  function intentCountBucket(s) {
-    const n = intentPath(s).length;
-    return n === 0 ? 'none' : n === 1 ? 'one' : 'multiple';
-  }
-
+  // ---------- Filters ----------
   function applyFilters(sessions, f = {}) {
-    const bots = f.botIds && f.botIds.length ? new Set(f.botIds) : null;
     const q = (f.search || '').trim().toLowerCase();
     return sessions.filter((s) => {
-      if (f.preview === 'exclude' && s.preview) return false;
-      if (f.preview === 'only' && !s.preview) return false;
-      if (bots && !bots.has(s.botId)) return false;
+      if (f.preview === 'only' ? !s.preview : f.preview !== 'include' && s.preview) return false;
+      if (f.agent && s.agentName !== f.agent) return false;
       if (f.media && s.media !== f.media) return false;
-      if (f.intent && !sessionIntents(s).includes(f.intent)) return false;
-      if (f.containment && containment(s) !== f.containment) return false;
-      if (f.intentCount && intentCountBucket(s) !== f.intentCount) return false;
-      if (f.botResult && (s.botResult || '') !== f.botResult) return false;
-      if (f.recognitionFailure === 'yes' && !s.recognitionFailures) return false;
-      if (f.recognitionFailure === 'no' && s.recognitionFailures) return false;
-      if (q && !(`${s.conversationId || ''} ${s.id}`.toLowerCase().includes(q))) return false;
+      if (f.intent && !intents(s).some((i) => i.name === f.intent)) return false;
+      if (f.verdict && sessionVerdict(s) !== f.verdict) return false;
+      if (f.intentVerdict && !intents(s).some((i) => i.verdict === f.intentVerdict && (!f.intent || i.name === f.intent))) return false;
+      if (f.issues === 'yes' && !issueCount(s)) return false;
+      if (f.issues === 'no' && issueCount(s)) return false;
+      if (q && !`${s.conversationId || ''} ${s.id}`.toLowerCase().includes(q)) return false;
       return true;
     });
   }
 
-  const ratio = (n, d) => (d ? n / d : null);
-  const median = (values) => {
-    const v = values.filter((x) => x != null).sort((a, b) => a - b);
-    if (!v.length) return null;
-    const mid = Math.floor(v.length / 2);
-    return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
-  };
-  const mean = (values) => {
-    const v = values.filter((x) => x != null);
-    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
-  };
-
-  // Bot response times are per customer turn; org- and bot-level figures pool every
-  // turn rather than averaging per-session values, so a long session weighs more.
-  function responseStats(sessions) {
-    const times = [];
-    let timedSessions = 0;
+  function options(sessions) {
+    const agents = new Set();
+    const media = new Set();
+    const names = new Set();
     for (const s of sessions) {
-      if (s.responseTimesMs?.length) timedSessions++;
-      for (const ms of s.responseTimesMs || []) times.push(ms);
+      if (s.agentName) agents.add(s.agentName);
+      if (s.media) media.add(s.media);
+      for (const i of intents(s)) names.add(i.name);
     }
-    return { responseTurns: times.length, timedSessions, medianResponseMs: median(times), maxResponseMs: times.length ? times.reduce((a, b) => (b > a ? b : a)) : null };
+    const sort = (set) => [...set].sort((a, b) => a.localeCompare(b));
+    return { agents: sort(agents), media: sort(media), intents: sort(names) };
   }
 
-  function sessionResponse(s) {
-    return responseStats([s]);
+  // ---------- Summaries ----------
+  function tallyIntents(sessions) {
+    const t = { valid: 0, partial: 0, not_valid: 0, no_chance: 0 };
+    for (const s of sessions) for (const i of intents(s)) if (i.verdict in t) t[i.verdict]++;
+    return t;
   }
 
   function summarize(sessions) {
-    let contained = 0, escalated = 0, unknown = 0, reachedAgent = 0, inferred = 0;
-    let queries = 0, served = 0, withFailure = 0, withIntent = 0, multiIntent = 0, intentMatches = 0;
+    const analyzed = sessions.filter((s) => s.analysis);
+    const verdicts = {};
     for (const s of sessions) {
-      const c = containment(s);
-      if (c === 'contained') contained++;
-      else if (c === 'escalated') escalated++;
-      else unknown++;
-      if (s.escalation === 'agent') reachedAgent++;
-      if (s.escalation == null) inferred++;
-      queries += s.queries || 0;
-      served += s.selfServedQueries || 0;
-      if (s.recognitionFailures) withFailure++;
-      const n = intentPath(s).length;
-      if (n) withIntent++;
-      intentMatches += n;
-      if (n > 1) multiIntent++;
+      const v = sessionVerdict(s);
+      verdicts[v] = (verdicts[v] || 0) + 1;
     }
-    const known = contained + escalated;
+    const scored = (verdicts.all_valid || 0) + (verdicts.not_all_valid || 0);
+    const withIntents = analyzed.filter((s) => intents(s).length);
+    const t = tallyIntents(sessions);
+    const judgedIntents = t.valid + t.partial + t.not_valid;
+    const responseTimes = sessions.flatMap((s) => s.responseTimesMs || []);
+    let toolCalls = 0, toolFailures = 0, guardrails = 0, errors = 0;
+    for (const s of sessions) {
+      toolCalls += s.toolCalls || 0;
+      toolFailures += s.issues?.tool_failed || 0;
+      guardrails += s.issues?.guardrail || 0;
+      errors += (s.issues?.error || 0) + (s.issues?.no_reply || 0);
+    }
     return {
       sessions: sessions.length,
-      contained,
-      escalated,
-      unknown,
-      inferred,
-      reachedAgent,
-      containmentRate: ratio(contained, known),
-      escalationRate: ratio(escalated, known),
-      agentRate: ratio(reachedAgent, sessions.length),
-      selfServiceRate: ratio(served, queries),
-      queries,
-      intentRate: ratio(withIntent, sessions.length),
-      withIntent,
-      multiIntent,
-      intentsPerSession: ratio(intentMatches, withIntent),
-      recognitionFailureRate: ratio(withFailure, sessions.length),
-      avgTurns: mean(sessions.map((s) => s.turns)),
-      // Median, because messaging sessions can stay open for days and swamp an average.
-      medianDurationMs: median(sessions.map((s) => s.durationMs)),
-      ...responseStats(sessions),
+      analyzed: analyzed.length,
+      verdicts,
+      scored,
+      allValid: verdicts.all_valid || 0,
+      allValidRate: ratio(verdicts.all_valid || 0, scored),
+      intents: t.valid + t.partial + t.not_valid + t.no_chance,
+      intentsPerSession: ratio(withIntents.reduce((a, s) => a + intents(s).length, 0), withIntents.length),
+      multiIntent: withIntents.filter((s) => intents(s).length > 1).length,
+      intentVerdicts: t,
+      judgedIntents,
+      validIntentRate: ratio(t.valid, judgedIntents),
+      toolCalls,
+      toolFailures,
+      toolSuccessRate: toolCalls ? 1 - toolFailures / toolCalls : null,
+      guardrails,
+      errors,
+      agentRequested: sessions.filter((s) => s.agentRequested).length,
+      medianResponseMs: median(responseTimes),
+      responseTurns: responseTimes.length,
     };
   }
 
-  function localDay(iso) {
-    const d = new Date(iso);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-
-  // Daily contained / escalated counts, with empty days filled across [startIso, endIso).
-  function byDay(sessions, startIso, endIso) {
-    const days = new Map();
-    const cursor = new Date(startIso);
-    cursor.setHours(0, 0, 0, 0);
-    const end = new Date(endIso);
-    while (cursor < end) {
-      days.set(localDay(cursor), { day: localDay(cursor), contained: 0, escalated: 0, unknown: 0 });
-      cursor.setDate(cursor.getDate() + 1);
-    }
+  // One row per intent name: how often it came up and how the AVA handled it.
+  function intentTable(sessions) {
+    const rows = new Map();
     for (const s of sessions) {
-      if (!s.start) continue;
-      const key = localDay(s.start);
-      if (!days.has(key)) days.set(key, { day: key, contained: 0, escalated: 0, unknown: 0 });
-      days.get(key)[containment(s)]++;
-    }
-    return [...days.values()].sort((a, b) => a.day.localeCompare(b.day));
-  }
-
-  function countBy(sessions, keyFn, labelFn) {
-    const counts = new Map();
-    for (const s of sessions) {
-      for (const key of [].concat(keyFn(s))) {
-        if (key === undefined) continue;
-        counts.set(key, (counts.get(key) || 0) + 1);
+      const seen = new Set();
+      for (const i of intents(s)) {
+        if (!rows.has(i.name)) rows.set(i.name, { intent: i.name, sessions: 0, valid: 0, partial: 0, not_valid: 0, no_chance: 0 });
+        const r = rows.get(i.name);
+        if (!seen.has(i.name)) r.sessions++;
+        seen.add(i.name);
+        if (i.verdict in r) r[i.verdict]++;
       }
     }
-    return [...counts.entries()]
-      .map(([key, count]) => ({ key, label: labelFn ? labelFn(key) : key, count }))
-      .sort((a, b) => b.count - a.count);
+    return [...rows.values()]
+      .map((r) => ({ ...r, judged: r.valid + r.partial + r.not_valid, validRate: ratio(r.valid, r.valid + r.partial + r.not_valid) }))
+      .sort((a, b) => b.sessions - a.sessions || a.intent.localeCompare(b.intent));
   }
 
-  const byResult = (sessions) => countBy(sessions, (s) => s.botResult || null, resultLabel);
-  const byFailureReason = (sessions) => countBy(sessions, (s) => s.recognitionFailureReasons, failureLabel);
-
-  function groupTable(sessions, keysFn, describe) {
+  // One row per AVA (all versions together).
+  function agentTable(sessions) {
     const groups = new Map();
     for (const s of sessions) {
-      for (const key of keysFn(s)) {
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(s);
-      }
+      const k = s.agentName || '(unknown)';
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(s);
     }
-    return [...groups.entries()]
-      .map(([key, rows]) => ({ key, ...describe(key, rows), ...summarize(rows) }))
-      .sort((a, b) => b.sessions - a.sessions);
+    return [...groups].map(([agentName, list]) => {
+      const sum = summarize(list);
+      const versions = new Set(list.flatMap((s) => (s.agents || []).filter((a) => a.name === agentName).map((a) => a.version)));
+      return {
+        agentName,
+        versions: [...versions].sort((a, b) => Number(a) - Number(b) || a.localeCompare(b)),
+        media: [...new Set(list.map((s) => s.media).filter(Boolean))].join(', '),
+        sessions: list.length,
+        analyzed: sum.analyzed,
+        intentsPerSession: sum.intentsPerSession,
+        allValidRate: sum.allValidRate,
+        validIntentRate: sum.validIntentRate,
+        toolCalls: sum.toolCalls,
+        toolFailures: sum.toolFailures,
+        guardrails: sum.guardrails,
+        medianResponseMs: sum.medianResponseMs,
+      };
+    }).sort((a, b) => b.sessions - a.sessions);
   }
 
-  function intentTable(sessions) {
-    const total = sessions.length;
-    return groupTable(
-      sessions,
-      sessionIntents,
-      (key, rows) => ({
-        intent: key,
-        share: ratio(rows.length, total),
-        asFinal: rows.filter((r) => r.finalIntent === key).length,
-        matches: rows.reduce((a, r) => a + intentPath(r).filter((i) => i === key).length, 0),
-      })
-    );
+  function localDay(d) {
+    const x = new Date(d);
+    return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
   }
 
-  function botTable(sessions) {
-    return groupTable(
-      sessions,
-      (s) => [s.botId],
-      (key, rows) => ({ botId: key, botName: rows[0].botName, botType: rows[0].botType, media: [...new Set(rows.map((r) => r.media))].join(', ') })
-    );
-  }
-
-  function options(sessions) {
-    const bots = new Map();
-    const intents = new Set();
-    const results = new Set();
-    const media = new Set();
-    for (const s of sessions) {
-      bots.set(s.botId, s.botName);
-      sessionIntents(s).forEach((i) => intents.add(i));
-      if (s.botResult) results.add(s.botResult);
-      if (s.media) media.add(s.media);
-    }
-    const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' });
-    return {
-      bots: [...bots.entries()].map(([id, name]) => ({ id, name: name || id })).sort((a, b) => byName(a.name, b.name)),
-      intents: [...intents].sort(byName),
-      results: [...results].sort().map((code) => ({ code, label: resultLabel(code) })),
-      media: [...media].sort(),
-    };
-  }
-
-  // The dashboard's side of "Check against Genesys": the same totals Genesys reports in
-  // its own aggregates, rebuilt from the session rows the dashboard uses.
-  function verificationTotals(sessions) {
-    const sum = (f) => sessions.reduce((a, s) => a + (f(s) || 0), 0);
-    const conversations = (pred) => new Set(sessions.filter(pred).map((s) => s.conversationId).filter(Boolean)).size;
-    const intentSessions = {};
-    for (const s of sessions) for (const i of s.intents) intentSessions[i] = (intentSessions[i] || 0) + 1;
-    return {
-      totals: {
-        sessions: sessions.length,
-        turns: sum((s) => s.turns),
-        exits: sessions.filter((s) => s.outcome === 'exit').length,
-        disconnects: sessions.filter((s) => s.outcome === 'disconnect').length,
-        recognitionFailures: sum((s) => s.recognitionFailures),
-        queries: sum((s) => s.queries),
-        selfServedQueries: sum((s) => s.selfServedQueries),
-        conversations: conversations(() => true),
-        conversationsWithAgent: conversations((s) => s.escalation === 'agent'),
-      },
-      intentSessions,
-    };
-  }
-
-  const api = { intentPath, intentCountBucket, verificationTotals, containment, applyFilters, summarize, byDay, byResult, byFailureReason, intentTable, botTable, options, resultLabel, failureLabel, localDay, median, responseStats, sessionResponse };
-  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, localDay };
+  if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);

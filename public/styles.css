@@ -271,3 +271,22 @@ table.data .empty td { cursor: default; color: var(--muted); text-align: center;
 .pie-legend .swatch { width: 12px; height: 12px; border-radius: 3px; }
 .pie-legend .val { font-variant-numeric: tabular-nums; color: var(--text-2); }
 .pie-legend .val b { color: var(--text); font-weight: 600; }
+
+/* Dashboard v2: AVA intent verdicts */
+.badge.yes::before { background: var(--good); }
+.badge.no::before { background: var(--critical); }
+.chip.v-valid { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, transparent); }
+.chip.v-partial { color: var(--text); border-color: var(--cat-4); background: color-mix(in srgb, var(--cat-4) 14%, var(--surface)); }
+.chip.v-not_valid { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 50%, transparent); }
+.chip.v-no_chance { color: var(--muted); border-style: dashed; }
+span.v-partial { color: var(--cat-4); font-weight: 600; }
+span.v-not_valid { color: var(--critical); font-weight: 600; }
+.bar-fill.v-bg-valid { background: var(--good); }
+.bar-fill.v-bg-partial { background: var(--cat-4); }
+.bar-fill.v-bg-not_valid { background: var(--critical); }
+.bar-fill.v-bg-no_chance { background: var(--series-unknown); }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; max-width: 420px; }
+.banner.progress { border-style: dashed; }
+.intent-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 12px; }
+.intent-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.definitions dd ul { margin: 6px 0; padding-left: 18px; }
