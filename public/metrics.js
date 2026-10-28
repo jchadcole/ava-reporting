@@ -216,6 +216,73 @@
     return no('customer_left');
   }
 
+  // Plain-language reasons a session was not contained: the exclusion or outcome that decided
+  // it, then why each of the three containment rules did not apply.
+  const TRANSFER_REASON_TEXT = {
+    unsupported_intent: 'the customer asked for something the AVA is not designed to handle',
+    user_frustration: 'the customer became frustrated with the AVA',
+    system_error: 'an error or failure forced the hand-off',
+    customer_preference: 'the customer asked for a person',
+  };
+
+  function containmentExplanation(s) {
+    const c = containment(s);
+    if (c.status !== 'not_contained') return null;
+    const a = s.analysis;
+    const list = intents(s);
+    const transferred = s.transferred ?? (a.transferReason ? a.transferReason !== 'none' : null);
+    const reason = a.transferReason && a.transferReason !== 'none' ? a.transferReason : null;
+    const loops = a.misunderstandings || 0;
+    const q = (i) => `“${i.name}”`;
+    const names = (xs) => (xs.length === 1 ? q(xs[0]) : `${xs.slice(0, -1).map(q).join(', ')} and ${q(xs[xs.length - 1])}`);
+    const unresolvedSupported = list.filter((i) => i.supported && !i.resolved && i.verdict !== 'no_chance');
+    const unsupported = list.filter((i) => !i.supported);
+    const resolvedSupported = list.filter((i) => i.supported && i.resolved);
+    const handoff = transferred
+      ? `The conversation was handed to a person${s.handoff === 'agent' ? ' and reached an agent' : s.handoff === 'queue' ? ' (sent to a queue)' : ''}${reason ? ` because ${TRANSFER_REASON_TEXT[reason]}` : ''}.`
+      : null;
+
+    let summary;
+    if (c.rule === 'supported_unresolved') {
+      summary = `The AVA did not resolve ${names(unresolvedSupported)}, which ${unresolvedSupported.length > 1 ? 'are' : 'is'} within what it is designed to handle. A supported intent left unresolved always rules out containment${transferred ? ', and a hand-off to a person does not count as resolving it' : ''}.`;
+    } else if (c.rule === 'breakdown') {
+      summary = `The hand-off happened because the AVA broke down, not at a clean boundary: ${reason === 'system_error' ? 'an error or failure forced the transfer' : `the AVA misunderstood the customer ${loops} times`}. Such a transfer always rules out containment.`;
+    } else if (c.rule === 'transferred') {
+      summary = `${handoff} It was not a hand-off of an unsupported intent after the AVA had resolved a supported one, so it does not count as graceful partial containment.`;
+    } else if (c.rule === 'unsupported_unresolved') {
+      summary = `${names(unsupported.filter((i) => !i.resolved))} ${unsupported.length > 1 ? 'were' : 'was'} outside what the AVA is designed to handle and went unresolved, and the customer was not handed to a person for ${unsupported.length > 1 ? 'them' : 'it'}.`;
+    } else {
+      summary = 'The customer left before the AVA resolved their request, so the session did not end in a self-service resolution.';
+    }
+
+    const rules = [];
+    // 1. Full task resolution
+    const r1 = [];
+    if (transferred) r1.push('the session was transferred to a person');
+    if (unsupported.length) r1.push(`${names(unsupported)} ${unsupported.length > 1 ? 'are' : 'is'} not supported`);
+    const unresolved = list.filter((i) => !i.resolved);
+    if (unresolved.length) r1.push(`${names(unresolved)} ${unresolved.length > 1 ? 'were' : 'was'} not resolved`);
+    rules.push({ rule: CONTAINMENT_RULES.full_resolution, why: r1.length ? `Not met: ${r1.join('; ')}.` : 'Not met.' });
+    // 2. Graceful partial containment
+    const r2 = [];
+    if (!transferred) r2.push('there was no transfer to a person');
+    else if (reason !== 'unsupported_intent') r2.push(reason ? `the transfer happened because ${TRANSFER_REASON_TEXT[reason]}, not because of an unsupported intent` : 'the transfer was not caused by an unsupported intent');
+    if (!resolvedSupported.length) r2.push('no supported intent was resolved first');
+    rules.push({ rule: CONTAINMENT_RULES.partial, why: r2.length ? `Not met: ${r2.join('; ')}.` : 'Met, but an exclusion applied.' });
+    // 3. Self-service deflection
+    const r3 = [];
+    if (transferred) r3.push('the session was transferred');
+    else if (!s.endedNormally) r3.push('the session did not end normally (it ended with an error or Genesys has no record of how it ended)');
+    const unresolvedHandled = list.filter((i) => i.verdict !== 'no_chance' && !i.resolved);
+    if (unresolvedHandled.length) r3.push(`${names(unresolvedHandled)} ${unresolvedHandled.length > 1 ? 'were' : 'was'} handled but not resolved`);
+    rules.push({ rule: CONTAINMENT_RULES.deflection, why: r3.length ? `Not met: ${r3.join('; ')}.` : 'Met, but an exclusion applied.' });
+
+    const facts = [];
+    if (handoff && c.rule !== 'transferred') facts.push(handoff);
+    if (loops) facts.push(`Claude counted ${loops} time${loops > 1 ? 's' : ''} the AVA misunderstood the customer.`);
+    return { title: c.reason, summary, facts, rules };
+  }
+
   function containmentSummary(sessions) {
     const counts = {};
     let contained = 0;
@@ -400,7 +467,7 @@
     return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
   }
 
-  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, abandonment, abandonmentSummary, ABANDON_RULES, NOT_ABANDONED, EXIT_LABEL, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, localDay };
+  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, containmentExplanation, abandonment, abandonmentSummary, ABANDON_RULES, NOT_ABANDONED, EXIT_LABEL, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, localDay };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);

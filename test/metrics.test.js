@@ -146,3 +146,13 @@ test('abandonment follows the three rules and the exclusions', () => {
   const sum = M.abandonmentSummary([s([i(true, false)], { customerTurns: 4 }), s([i(true, true)])]);
   assert.deepEqual([sum.abandoned, sum.scored, sum.rate], [1, 2, 0.5]);
 });
+
+test('a not-contained session explains the rule that decided it and why the others failed', () => {
+  const s = session({ transferred: true, handoff: 'agent', endedNormally: false, analysis: { intents: [{ name: 'Speak to a person', supported: true, resolved: false, verdict: 'valid' }], transferReason: 'customer_preference', misunderstandings: 0, lastBotState: 'providing_answer' } });
+  const x = M.containmentExplanation(s);
+  assert.equal(x.title, 'Supported intent not resolved');
+  assert.match(x.summary, /did not resolve “Speak to a person”/);
+  assert.equal(x.rules.length, 3);
+  assert.match(x.rules[1].why, /because the customer asked for a person, not because of an unsupported intent/);
+  assert.equal(M.containmentExplanation(session({ transferred: false, endedNormally: true, analysis: { intents: [{ name: 'A', supported: true, resolved: true, verdict: 'valid' }], transferReason: 'none', misunderstandings: 0 } })), null);
+});

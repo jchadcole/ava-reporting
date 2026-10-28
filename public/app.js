@@ -479,7 +479,7 @@
     $('drawer-sub').textContent = `${fmtDateTime(s.start)} · ${s.media || ''} · ${s.botName}`;
     $('drawer-close').focus();
     const body = $('drawer-body');
-    body.innerHTML = factsHtml(s) + intentsHtml(s) + '<section><h3>AVA transcript</h3><div class="empty-state">Loading…</div></section>';
+    body.innerHTML = factsHtml(s) + notContainedHtml(s) + intentsHtml(s) + '<section><h3>AVA transcript</h3><div class="empty-state">Loading…</div></section>';
     try {
       let detail = state.detailCache.get(s.id);
       if (!detail) {
@@ -491,10 +491,10 @@
         state.detailCache.set(s.id, detail);
       }
       if (drawer.dataset.session !== s.id) return;
-      body.innerHTML = factsHtml(s) + intentsHtml(s) + transcriptHtml(detail);
+      body.innerHTML = factsHtml(s) + notContainedHtml(s) + intentsHtml(s) + transcriptHtml(detail);
     } catch (err) {
       if (drawer.dataset.session !== s.id) return;
-      body.innerHTML = factsHtml(s) + intentsHtml(s) + `<section><div class="empty-state">Couldn’t load the transcript: ${esc(err.message)}</div></section>`;
+      body.innerHTML = factsHtml(s) + notContainedHtml(s) + intentsHtml(s) + `<section><div class="empty-state">Couldn’t load the transcript: ${esc(err.message)}</div></section>`;
     }
   }
 
@@ -527,6 +527,18 @@
       ['Conversation ID', `<span class="mono">${esc(s.conversationId || '–')}</span>`, true],
     ];
     return `<section class="facts">${facts.map(([k, v, wide]) => `<div class="fact${wide ? ' wide' : ''}"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`).join('')}</section>`;
+  }
+
+  // Why a not-contained session failed containment, from the same rules the Overview uses.
+  function notContainedHtml(s) {
+    const x = M.containmentExplanation(s);
+    if (!x) return '';
+    return `<section class="not-contained"><h3>Not Contained Reason</h3>
+      <p class="nc-title"><span class="badge no">${esc(x.title)}</span></p>
+      <p class="nc-summary">${esc(x.summary)}</p>
+      ${x.facts.map((f) => `<p class="cell-sub">${esc(f)}</p>`).join('')}
+      <ul class="nc-rules">${x.rules.map((r) => `<li><b>${esc(r.rule)}</b>: ${esc(r.why)}</li>`).join('')}</ul>
+    </section>`;
   }
 
   function intentsHtml(s) {

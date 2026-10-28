@@ -325,3 +325,6 @@ span.v-not_valid { color: var(--critical); font-weight: 600; }
 .ji-chip[aria-pressed="true"] .muted { color: rgba(255, 255, 255, 0.8); }
 .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 @media (max-width: 1100px) { .grid.three { grid-template-columns: 1fr; } }
+.not-contained .nc-title { margin: 0 0 6px; }
+.not-contained .nc-summary { margin: 0 0 6px; line-height: 1.45; }
+.not-contained .nc-rules { margin: 8px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; color: var(--text-2); font-size: 13px; }
