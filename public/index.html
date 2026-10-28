@@ -212,8 +212,8 @@
 
   <div id="view-escalation" hidden>
     <div class="seg" id="esc-mode" role="group" aria-label="Sessions to show">
-      <button type="button" data-mode="request" aria-pressed="true">Asked for a person</button>
-      <button type="button" data-mode="escalated" aria-pressed="false">All escalations</button>
+      <button type="button" data-mode="handoff" aria-pressed="true">Intents before the hand-off</button>
+      <button type="button" data-mode="reasons" aria-pressed="false">Escalation reasons</button>
     </div>
     <section class="kpis" id="esc-kpis" aria-label="Escalation metrics"></section>
     <section class="card">
@@ -247,13 +247,15 @@
     </section>
     <section class="card definitions">
       <h2>How escalations are measured</h2>
-      <dl data-esc-mode="request">
-        <dt>Asked for a person</dt><dd>Claude found an intent asking to speak to a person (an agent, representative or human), or Genesys recorded that the customer asked for an agent. Everything else the customer raised before that first request counts as an intent before the request. Customers who asked for a person straight away have no intents before it, so they are counted in the tiles but not drawn in the graph.</dd>
-        <dt>AVA answer before the request</dt><dd>Claude’s verdict on the intent raised right before the request: not valid, partial, valid (the customer asked for a person anyway), or the customer asked before the AVA could answer.</dd>
-        <dt>Request rate</dt><dd>Of all sessions in which Claude found the intent, the share where the customer went on to ask for a person. A high rate with many sessions is the best place to improve the AVA.</dd>
-        <dt>Not valid or partial, not resolved</dt><dd>For the sessions where the intent came before the request: how often the AVA’s answer to it was not valid or only partial, and how often Claude judged it not resolved. Select a row to read Claude’s note on each answer.</dd>
+      <dl data-esc-mode="handoff">
+        <dt>Escalated</dt><dd>Genesys shows the conversation going to a queue or an agent after the AVA started, whoever asked for it. When Genesys conversation detail is missing, Claude’s transfer reason stands in.</dd>
+        <dt>Intents before the hand-off</dt><dd>If the customer asked to speak to a person (Claude found an intent such as “Speak to a person” or “Request a live agent”), the intents raised before that first request. Otherwise, every intent in the session, because the AVA handed off on its own. Customers who asked for a person first have no intents before the hand-off, so they are counted in the tiles but not drawn in the graph.</dd>
+        <dt>Who asked for the person</dt><dd>“Customer” when Claude found a request for a person or Genesys recorded that the customer asked for an agent; otherwise the AVA handed off without a request.</dd>
+        <dt>AVA answer before the hand-off</dt><dd>Claude’s verdict on the intent raised right before the hand-off: not valid, partial, valid (escalated anyway), or escalated before the AVA could answer.</dd>
+        <dt>Escalation rate</dt><dd>Of all sessions in which Claude found the intent, the share that escalated with the intent raised before the hand-off. A high rate with many sessions is the best place to improve the AVA.</dd>
+        <dt>Not valid or partial, not resolved</dt><dd>For the escalated sessions with the intent: how often the AVA’s answer to it was not valid or only partial, and how often Claude judged it not resolved. Select a row to read Claude’s note on each answer.</dd>
       </dl>
-      <dl data-esc-mode="escalated" hidden>
+      <dl data-esc-mode="reasons" hidden>
         <dt>Escalated</dt><dd>Genesys shows the conversation going to a queue or an agent after the AVA started. “Reached an agent” means an agent picked it up; “Queue only” means it was queued but no agent interaction is recorded (for example, the customer left while waiting). When Genesys conversation detail is missing, Claude’s transfer reason stands in.</dd>
         <dt>Escalation reason</dt><dd>Claude’s reading of why the hand-off happened: an intent the AVA doesn’t support, customer frustration, a system error, or the customer simply asking for a person. “Reason not identified” is a hand-off Claude saw no reason for in the AVA transcript.</dd>
         <dt>Escalation rate</dt><dd>Of all sessions in which Claude found the intent, the share that escalated. A high rate with many sessions is the best place to improve the AVA.</dd>

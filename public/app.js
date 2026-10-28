@@ -42,7 +42,7 @@
     expanded: { intents: false, agents: false },
     tab: 'overview',
     journey: { steps: 4, per: 8, focus: [], intents: [], match: 'any', allChips: false }, // focus: [{ id, label }] from clicks on the graph
-    escalation: { mode: 'request', steps: 4, per: 8, focus: [], intents: [], match: 'any', allChips: false, allNotes: false },
+    escalation: { mode: 'handoff', steps: 4, per: 8, focus: [], intents: [], match: 'any', allChips: false, allNotes: false },
   };
   const TABLE_PREVIEW_ROWS = 10;
   const verdictLabel = (key) => state.data?.verdicts.find((v) => v.key === key)?.label || key;
@@ -83,7 +83,7 @@
     if (Number(p.get('per'))) flow.per = Number(p.get('per'));
     if (p.get('jintents')) flow.intents = p.get('jintents').split('|');
     if (p.get('jmatch') === 'all') flow.match = 'all';
-    if (p.get('emode') === 'all') state.escalation.mode = 'escalated';
+    if (p.get('emode') === 'reasons') state.escalation.mode = 'reasons';
   }
   function writeHash() {
     const p = new URLSearchParams();
@@ -101,7 +101,7 @@
       p.set('per', flow.per);
       if (flow.intents.length) p.set('jintents', flow.intents.join('|'));
       if (flow.match === 'all') p.set('jmatch', 'all');
-      if (state.tab === 'escalation' && state.escalation.mode === 'escalated') p.set('emode', 'all');
+      if (state.tab === 'escalation' && state.escalation.mode === 'reasons') p.set('emode', 'reasons');
     }
     history.replaceState(null, '', `#${p.toString()}`);
   }
@@ -609,37 +609,37 @@
         cells: (r) => rateCell(r.allValidRate),
       },
     },
-    get escalation() { return ESC_MODES[state.escalation.mode] || ESC_MODES.request; },
+    get escalation() { return ESC_MODES[state.escalation.mode] || ESC_MODES.handoff; },
   };
   const ESC_IDS = { graph: 'escalation', steps: 'esc-steps', per: 'esc-per', intents: 'esc-intents', focus: 'esc-focus', count: 'esc-count', paths: 'esc-paths' };
-  // Agent Escalation has two views: the intents customers raised before asking for a person
-  // (the default), and every session that was handed to a person.
+  // Agent Escalation covers every session handed to a person, whoever asked for it, in two views:
+  // the intents raised before the hand-off (the default), and the reasons for the escalation.
   const ESC_MODES = {
-    request: {
+    handoff: {
       ids: ESC_IDS,
-      sessions: () => state.filtered.filter(M.askedForPerson),
-      names: M.namesBeforeRequest,
-      graphOpts: { names: M.namesBeforeRequest, outcome: M.requestOutcome, outcomes: M.REQUEST_OUTCOMES },
-      lastColumn: 'AVA answer before the request',
-      stepName: 'Before request',
-      startTitle: 'Sessions that asked for a person after other intents',
-      emptyText: 'No sessions in these filters asked for a person after raising another intent. Requests appear here once Claude has read the sessions.',
+      sessions: () => state.filtered.filter(M.isEscalated),
+      names: M.namesBeforeHandoff,
+      graphOpts: { names: M.namesBeforeHandoff, outcome: M.handoffOutcome, outcomes: M.HANDOFF_OUTCOMES },
+      lastColumn: 'AVA answer before the hand-off',
+      stepName: 'Before hand-off',
+      startTitle: 'Escalated sessions with intents before the hand-off',
+      emptyText: 'No escalated sessions with intents before the hand-off match these filters. They appear here once Claude has read the sessions.',
       nodeExtra: (sub) => {
         const failed = sub.filter((p) => p.outcome === 'not_valid' || p.outcome === 'partial').length;
         const judged = sub.filter((p) => p.outcome !== 'no_chance').length;
-        return [['Asked right after a not valid or partial answer', judged ? `${pct(failed / judged)} of ${num(judged)}` : '–']];
+        return [['Escalated right after a not valid or partial answer', judged ? `${pct(failed / judged)} of ${num(judged)}` : '–']];
       },
       pathCols: {
-        head: '<th class="num">Not valid or partial right before</th><th class="num">Escalated</th>',
+        head: '<th class="num">Not valid or partial right before</th><th class="num">Customer asked for a person</th>',
         cells: (r, list) => {
-          const judged = list.filter((s) => ['valid', 'partial', 'not_valid'].includes(M.requestOutcome(s)));
-          const failed = judged.filter((s) => M.requestOutcome(s) !== 'valid').length;
-          return `${rateCell(judged.length ? failed / judged.length : null)}${rateCell(list.length ? list.filter(M.isEscalated).length / list.length : null)}`;
+          const judged = list.filter((s) => ['valid', 'partial', 'not_valid'].includes(M.handoffOutcome(s)));
+          const failed = judged.filter((s) => M.handoffOutcome(s) !== 'valid').length;
+          return `${rateCell(judged.length ? failed / judged.length : null)}${rateCell(list.length ? list.filter(M.askedForPerson).length / list.length : null)}`;
         },
       },
-      before: () => { renderRequestKpis(); renderRequestIntents(); },
+      before: () => { renderHandoffKpis(); renderHandoffIntents(); },
     },
-    escalated: {
+    reasons: {
       ids: ESC_IDS,
       sessions: () => state.filtered.filter(M.isEscalated),
       graphOpts: { outcome: M.escalationOutcome, outcomes: M.ESCALATION_OUTCOMES },
@@ -703,7 +703,7 @@
     };
     window.AvaJourney.render($(f.ids.graph), graph, { colors, onFocus, tooltip: showTooltip, hideTooltip, columnLabels: stepLabel, nodeExtra: f.nodeExtra, startTitle: f.startTitle, emptyText: f.emptyText });
     renderTopPaths(name, graph, all);
-    if (name === 'escalation') renderRequestWhy();
+    if (name === 'escalation') renderHandoffWhy();
     writeHash();
   }
 
@@ -824,24 +824,24 @@
   function renderEscalationMode() {
     const mode = state.escalation.mode;
     document.querySelectorAll('#esc-mode button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
-    const request = mode === 'request';
-    $('esc-title').firstChild.textContent = request ? 'Intents before asking for a person ' : 'Escalation journeys ';
-    $('esc-hint').textContent = request
-      ? 'Sessions where the customer asked to speak to a person after raising other intents. Each path runs through those intents in order and ends in how the AVA answered the one right before the request. Hover a node or line to trace its sessions; click it to focus on just those sessions.'
-      : 'Only sessions handed to a person after the AVA. Each path runs through the customer’s intents in order and ends in why the session escalated. Hover a node or line to trace its sessions; click it to focus on just those sessions.';
-    $('esc-table-title').textContent = request ? 'Intents leading to “speak to a person”' : 'Intents driving escalations';
-    $('esc-table-hint').textContent = request ? 'Select a row to see how the AVA answered it and why' : 'Select a row to show only escalations with that intent';
-    $('esc-paths-title').textContent = request ? 'Most common journeys before asking for a person' : 'Most common escalation journeys';
+    const handoff = mode === 'handoff';
+    $('esc-title').firstChild.textContent = handoff ? 'Intents before the hand-off ' : 'Escalation journeys ';
+    $('esc-hint').textContent = handoff
+      ? 'Every session handed to a person after the AVA, whether the customer asked or the AVA transferred them. Each path runs through the intents raised before the hand-off (before the first “speak to a person” request, if there was one) and ends in how the AVA answered the one right before it. Hover a node or line to trace its sessions; click it to focus on just those sessions.'
+      : 'Every session handed to a person after the AVA. Each path runs through the customer’s intents in order and ends in why the session escalated. Hover a node or line to trace its sessions; click it to focus on just those sessions.';
+    $('esc-table-title').textContent = handoff ? 'Intents leading to escalation' : 'Intents driving escalations';
+    $('esc-table-hint').textContent = handoff ? 'Select a row to see how the AVA answered it and why' : 'Select a row to show only escalations with that intent';
+    $('esc-paths-title').textContent = handoff ? 'Most common journeys before the hand-off' : 'Most common escalation journeys';
     document.querySelectorAll('[data-esc-mode]').forEach((el) => { el.hidden = el.dataset.escMode !== mode; });
   }
 
-  function renderRequestKpis() {
-    const r = M.requestSummary(state.filtered);
+  function renderHandoffKpis() {
+    const r = M.handoffSummary(state.filtered);
     const tiles = [
-      { label: 'Asked for a person', value: pct(r.rate, 1), meter: r.rate, sub: `${num(r.asked)} of ${num(r.sessions)} sessions with intents` },
-      { label: 'After other intents', value: num(r.afterIntents), sub: `${num(r.rightAway)} asked for a person straight away` },
-      { label: 'Intent most often right before', value: r.topLastIntent || '–', sub: r.topLastIntent ? `Right before the request in ${num(r.topLastCount)} of ${num(r.afterIntents)} sessions` : 'Waiting for Claude’s analysis', small: true },
-      { label: 'Asked after a poor answer', value: pct(r.failedRate, 1), meter: r.failedRate, sub: r.judged ? `${num(r.failed)} of ${num(r.judged)}: the AVA’s answer right before was not valid or partial` : 'Waiting for Claude’s analysis' },
+      { label: 'Escalated to a person', value: pct(r.rate, 1), meter: r.rate, sub: `${num(r.escalated)} of ${num(r.sessions)} AVA sessions · ${num(r.reachedAgent)} reached an agent` },
+      { label: 'Who asked for the person', value: r.analyzed ? `${pct(r.customerAsked / r.analyzed)} customer` : '–', meter: r.analyzed ? r.customerAsked / r.analyzed : null, sub: r.analyzed ? `${num(r.customerAsked)} customer asked · ${num(r.avaInitiated)} AVA handed off without a request` : 'Waiting for Claude’s analysis' },
+      { label: 'Intent most often right before', value: r.topLastIntent || '–', sub: r.topLastIntent ? `Right before the hand-off in ${num(r.topLastCount)} of ${num(r.withIntentsBefore)} sessions · ${num(r.noIntentsBefore)} asked for a person first` : 'Waiting for Claude’s analysis', small: true },
+      { label: 'Escalated after a poor answer', value: pct(r.failedRate, 1), meter: r.failedRate, sub: r.judged ? `${num(r.failed)} of ${num(r.judged)}: the AVA’s answer right before was not valid or partial` : 'Waiting for Claude’s analysis' },
     ];
     $('esc-kpis').innerHTML = tiles
       .map((t) => `<div class="kpi"><div class="kpi-label">${esc(t.label)}</div><div class="kpi-value${t.small ? ' kpi-text' : ''}" title="${esc(t.value)}">${esc(t.value)}</div>` +
@@ -859,23 +859,25 @@
     return `<span class="mix" title="${esc(title)}">${ANSWER_ORDER.filter((k) => v[k]).map((k) => `<span class="mix-${k}" style="width:${((v[k] / total) * 100).toFixed(1)}%"></span>`).join('')}</span>`;
   }
 
-  function renderRequestIntents() {
-    const rows = M.requestIntentTable(state.filtered);
+  function renderHandoffIntents() {
+    const rows = M.handoffIntentTable(state.filtered);
     const j = state.escalation;
     const active = (r) => j.intents.length === 1 && j.intents[0] === r.intent;
     const el = $('esc-intent-table');
-    el.innerHTML = '<thead><tr><th>Intent before the request</th><th class="num">Sessions</th><th class="num">Share of requests</th><th class="num">Request rate</th><th class="num">Right before the request</th><th>How the AVA answered</th><th class="num">Not valid or partial</th><th class="num">Not resolved</th></tr></thead><tbody>' +
+    el.innerHTML = '<thead><tr><th>Intent before the hand-off</th><th class="num">Escalated sessions</th><th class="num">Share of escalations</th><th class="num">Escalation rate</th><th class="num">Right before the hand-off</th><th>How the AVA answered</th><th class="num">Not valid or partial</th><th class="num">Not resolved</th><th class="num">Customer asked for a person</th><th>Main reason</th></tr></thead><tbody>' +
       (rows.length ? visibleRows('esc-intent-table', rows, active).map((r) => `<tr data-key="${esc(r.intent)}" class="${active(r) ? 'active' : ''}" tabindex="0">
           <td class="cell-strong">${esc(r.intent)}</td>
           <td class="num">${num(r.before)}</td>
-          ${rateCell(r.shareOfRequests)}
-          <td class="num" title="${num(r.before)} of ${num(r.sessions)} sessions with this intent went on to ask for a person">${pct(r.requestRate)} <span class="muted small">of ${num(r.sessions)}</span></td>
+          ${rateCell(r.shareOfEscalations)}
+          <td class="num" title="${num(r.before)} of ${num(r.sessions)} sessions with this intent were escalated">${pct(r.escalationRate)} <span class="muted small">of ${num(r.sessions)}</span></td>
           <td class="num">${num(r.rightBefore)}</td>
           <td>${verdictMix(r.verdicts)}</td>
           ${rateCell(r.notValidRate)}
           ${rateCell(r.unresolvedRate)}
+          ${rateCell(r.customerAskedRate)}
+          <td>${r.topReasonLabel ? esc(r.topReasonLabel) : '<span class="muted">–</span>'}</td>
         </tr>`).join('')
-        : '<tr class="empty"><td colspan="8">No sessions asked for a person after another intent yet.</td></tr>') + '</tbody>';
+        : '<tr class="empty"><td colspan="10">No escalated sessions with intents before the hand-off yet.</td></tr>') + '</tbody>';
     renderShowMore('esc-intent-table', rows.length);
     el.querySelectorAll('tbody tr[data-key]').forEach((tr) => {
       const act = () => {
@@ -891,13 +893,13 @@
     });
   }
 
-  // For one selected intent: how the AVA answered it before each request, in Claude's words.
+  // For one selected intent: how the AVA answered it before each hand-off, in Claude's words.
   const NOTE_PREVIEW = 8;
-  function renderRequestWhy() {
+  function renderHandoffWhy() {
     const j = state.escalation;
     const card = $('esc-why');
-    const name = j.mode === 'request' && j.intents.length === 1 ? j.intents[0] : null;
-    const row = name && M.requestIntentTable(state.filtered).find((r) => r.intent === name);
+    const name = j.mode === 'handoff' && j.intents.length === 1 ? j.intents[0] : null;
+    const row = name && M.handoffIntentTable(state.filtered).find((r) => r.intent === name);
     card.hidden = !row;
     if (!row) return;
     const v = row.verdicts;
@@ -905,18 +907,18 @@
     const reasons = new Map();
     for (const n of row.notes) if (n.transferReason && n.transferReason !== 'none') reasons.set(n.transferReason, (reasons.get(n.transferReason) || 0) + 1);
     const reasonText = [...reasons].sort((a, b) => b[1] - a[1]).map(([k, c]) => `${state.data.transferReasons.find((r) => r.key === k)?.label || k} ${num(c)}`).join(' · ');
-    $('esc-why-title').textContent = `Why customers asked for a person after “${name}”`;
-    $('esc-why-body').innerHTML = `<p class="why-summary">In <b>${num(row.before)}</b> sessions the customer raised this intent and then asked for a person (${pct(row.requestRate)} of the ${num(row.sessions)} sessions with it). Before the request, the AVA’s answer was
+    $('esc-why-title').textContent = `Why sessions with “${name}” went to a person`;
+    $('esc-why-body').innerHTML = `<p class="why-summary">In <b>${num(row.before)}</b> escalated sessions the customer raised this intent before the hand-off (${pct(row.escalationRate)} of the ${num(row.sessions)} sessions with it); the customer asked for a person in ${pct(row.customerAskedRate)} of them. Before the hand-off, the AVA’s answer was
         <span class="chip v-not_valid">not valid ${num(v.not_valid)}</span> <span class="chip v-partial">partial ${num(v.partial)}</span> <span class="chip v-valid">valid ${num(v.valid)}</span> <span class="chip v-no_chance">no chance to answer ${num(v.no_chance)}</span>.
         ${row.unresolvedRate != null ? `Claude judged it not resolved in ${pct(row.unresolvedRate)} of the sessions where the AVA answered.` : ''} ${reasonText ? `Claude’s transfer reasons: ${esc(reasonText)}.` : ''}</p>
-      <ol class="why-list">${notes.map((n, i) => `<li><div class="intent-head"><span class="chip v-${esc(n.verdict)}">${esc(verdictLabel(n.verdict))}</span><span class="muted small">${esc(fmtDateTime(n.start))}${n.escalated ? ' · escalated' : ' · not escalated'}</span><button type="button" class="btn btn-ghost" data-open="${esc(n.sessionId)}">Open session</button></div>
+      <ol class="why-list">${notes.map((n, i) => `<li><div class="intent-head"><span class="chip v-${esc(n.verdict)}">${esc(verdictLabel(n.verdict))}</span><span class="muted small">${esc(fmtDateTime(n.start))}${n.askedForPerson ? ' · customer asked for a person' : ' · AVA handed off'}${n.handoff === 'agent' ? ', reached an agent' : n.handoff === 'queue' ? ', queue only' : ''}</span><button type="button" class="btn btn-ghost" data-open="${esc(n.sessionId)}">Open session</button></div>
         ${n.customerAsked ? `<div class="cell-sub">Customer: ${esc(n.customerAsked)}</div>` : ''}<div class="why-text">${esc(n.why || 'No note from Claude.')}</div></li>`).join('')}</ol>
       ${row.notes.length > NOTE_PREVIEW ? `<button type="button" class="btn btn-ghost" id="esc-why-more">${j.allNotes ? 'Show fewer' : `Show all ${num(row.notes.length)}`}</button>` : ''}`;
     card.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => {
       const s = state.filtered.find((x) => x.id === b.dataset.open);
       if (s) openSession(s);
     }));
-    $('esc-why-more')?.addEventListener('click', () => { j.allNotes = !j.allNotes; renderRequestWhy(); });
+    $('esc-why-more')?.addEventListener('click', () => { j.allNotes = !j.allNotes; renderHandoffWhy(); });
   }
 
   // ---------- Events ----------
