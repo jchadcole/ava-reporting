@@ -21,6 +21,7 @@
   --cat-6: #008300;
   --good: #006300;
   --critical: #d03b3b;
+  --warning: #b86a00;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
   --radius: 10px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -49,6 +50,8 @@
     --cat-6: #008300;
     --good: #0ca30c;
     --critical: #e66767;
+  --warning: #e09a3c;
+    --warning: #e09a3c;
     --shadow: none;
   }
 }
@@ -108,9 +111,11 @@ main.loading { opacity: 0.55; pointer-events: none; transition: opacity 0.2s; }
 
 .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
 @media (min-width: 700px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (min-width: 900px) { #esc-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; box-shadow: var(--shadow); }
 .kpi-label { font-size: 12px; color: var(--text-2); }
 .kpi-value { font-size: 26px; font-weight: 600; margin-top: 4px; letter-spacing: -0.01em; }
+.kpi-value.kpi-text { font-size: 18px; line-height: 1.3; padding: 4px 0; overflow-wrap: anywhere; }
 .kpi-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
 .kpi-meter { height: 4px; border-radius: 2px; background: var(--grid); margin-top: 10px; overflow: hidden; }
 .kpi-meter > span { display: block; height: 100%; background: var(--series-1); border-radius: 2px; }

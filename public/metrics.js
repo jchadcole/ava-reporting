@@ -375,8 +375,9 @@
   const sequenceFocus = (names) => SEQ + names.join('\u0001');
   const MORE = 'More intents';
 
-  function journeyGraph(sessions, { maxSteps = 4, maxPerStep = 8, focus = [] } = {}) {
-    const raw = sessions.filter((s) => intents(s).length).map((s) => ({ id: s.id, names: intents(s).map((i) => i.name), outcome: sessionVerdict(s) }));
+  // `outcome` and `outcomes` swap the end column, e.g. the escalation reason on Agent Escalation.
+  function journeyGraph(sessions, { maxSteps = 4, maxPerStep = 8, focus = [], outcome = sessionVerdict, outcomes = OUTCOMES } = {}) {
+    const raw = sessions.filter((s) => intents(s).length).map((s) => ({ id: s.id, names: intents(s).map((i) => i.name), outcome: outcome(s) }));
     // Most common intents per step, counted before folding so the cut is stable.
     const keep = [];
     for (let step = 1; step <= maxSteps; step++) {
@@ -413,7 +414,7 @@
         if (!nodes.has(id)) {
           const [step, label] = id.split(/\|(.*)/s);
           const kind = step === '0' ? 'start' : step === 'end' ? 'outcome' : label === OTHER ? 'other' : label === MORE ? 'more' : 'intent';
-          nodes.set(id, { id, step: step === 'end' ? Infinity : Number(step), label: kind === 'outcome' ? OUTCOMES.find((o) => o.key === label)?.label || label : label, key: label, kind, count: 0 });
+          nodes.set(id, { id, step: step === 'end' ? Infinity : Number(step), label: kind === 'outcome' ? outcomes.find((o) => o.key === label)?.label || label : label, key: label, kind, count: 0 });
         }
         nodes.get(id).count++;
         if (i) {
@@ -423,7 +424,7 @@
         }
       });
     }
-    return { total: paths.length, allTotal, paths, nodes: [...nodes.values()], links: [...links.values()], maxSteps };
+    return { total: paths.length, allTotal, paths, nodes: [...nodes.values()], links: [...links.values()], maxSteps, outcomeOrder: outcomes.map((o) => o.key) };
   }
 
   // Link counts for a subset of a graph's paths, for highlighting the flow through a node or link.
@@ -462,12 +463,111 @@
     return [...rows.values()].map((r) => ({ ...r, allValidRate: ratio(r.allValid, r.scored) })).sort((a, b) => b.sessions - a.sessions).slice(0, limit);
   }
 
+  // ---------- Agent escalation ----------
+  // A session escalated when Genesys shows a hand-off to a queue or agent after the AVA; without
+  // conversation detail, Claude's transfer reason stands in.
+  function isEscalated(s) {
+    const r = s.analysis?.transferReason;
+    return Boolean(s.transferred ?? (r ? r !== 'none' : false));
+  }
+  const ESCALATION_OUTCOMES = [
+    { key: 'unsupported_intent', label: 'Unsupported intent' },
+    { key: 'user_frustration', label: 'Customer frustration' },
+    { key: 'system_error', label: 'System error' },
+    { key: 'customer_preference', label: 'Customer asked for a person' },
+    { key: 'unknown', label: 'Reason not identified' },
+  ];
+  const escalationLabel = (key) => ESCALATION_OUTCOMES.find((o) => o.key === key)?.label || key;
+  function escalationOutcome(s) {
+    const r = s.analysis?.transferReason;
+    return r && r !== 'none' && ESCALATION_OUTCOMES.some((o) => o.key === r) ? r : 'unknown';
+  }
+  // Asking for a person is how a hand-off happens, not why, so it is skipped when picking the
+  // intent the customer raised last before the hand-off (unless it is the only one).
+  const AGENT_REQUEST = /\b(person|agent|human|representative|someone|operator|live chat)\b/i;
+  function lastIntentBeforeEscalation(s) {
+    const names = intents(s).map((i) => i.name);
+    const real = names.filter((n) => !AGENT_REQUEST.test(n));
+    return (real.length ? real : names).at(-1) || null;
+  }
+  const topKey = (counts) => [...counts].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))[0]?.[0] ?? null;
+
+  // Per intent: how many escalated sessions include it, how often sessions with it escalate, how
+  // often it was the last thing raised before the hand-off, and why those sessions escalated.
+  function escalationIntentTable(sessions) {
+    const rows = new Map();
+    const asked = sessions.filter((s) => intents(s).length);
+    const escalatedTotal = asked.filter(isEscalated).length;
+    for (const s of asked) {
+      const esc = isEscalated(s);
+      const last = esc ? lastIntentBeforeEscalation(s) : null;
+      const seen = new Set();
+      for (const i of intents(s)) {
+        if (seen.has(i.name)) continue;
+        seen.add(i.name);
+        if (!rows.has(i.name)) rows.set(i.name, { intent: i.name, sessions: 0, escalated: 0, lastBefore: 0, reasons: new Map(), handled: 0, resolved: 0 });
+        const r = rows.get(i.name);
+        r.sessions++;
+        if (!esc) continue;
+        r.escalated++;
+        if (last === i.name) r.lastBefore++;
+        const o = escalationOutcome(s);
+        r.reasons.set(o, (r.reasons.get(o) || 0) + 1);
+        const same = intents(s).filter((x) => x.name === i.name && x.verdict !== 'no_chance');
+        if (same.length) {
+          r.handled++;
+          if (same.every((x) => x.resolved === true || (x.resolved == null && x.verdict === 'valid'))) r.resolved++;
+        }
+      }
+    }
+    return [...rows.values()].filter((r) => r.escalated).map((r) => {
+      const known = [...r.reasons].filter(([k]) => k !== 'unknown');
+      const topReason = topKey(new Map(known.length ? known : r.reasons));
+      return {
+        intent: r.intent, sessions: r.sessions, escalated: r.escalated,
+        shareOfEscalated: ratio(r.escalated, escalatedTotal),
+        escalationRate: ratio(r.escalated, r.sessions),
+        lastBefore: r.lastBefore,
+        resolvedRate: ratio(r.resolved, r.handled),
+        topReason, topReasonLabel: topReason ? escalationLabel(topReason) : null,
+        reasons: Object.fromEntries(r.reasons),
+      };
+    }).sort((a, b) => b.escalated - a.escalated || b.lastBefore - a.lastBefore || a.intent.localeCompare(b.intent));
+  }
+
+  function escalationSummary(sessions) {
+    const asked = sessions.filter((s) => intents(s).length);
+    const escalated = sessions.filter(isEscalated);
+    const escWithIntents = asked.filter(isEscalated);
+    const lasts = new Map();
+    const reasons = new Map();
+    for (const s of escWithIntents) {
+      const l = lastIntentBeforeEscalation(s);
+      if (l) lasts.set(l, (lasts.get(l) || 0) + 1);
+      const o = escalationOutcome(s);
+      if (o !== 'unknown') reasons.set(o, (reasons.get(o) || 0) + 1);
+    }
+    const topLast = topKey(lasts);
+    const topReason = topKey(reasons);
+    return {
+      sessions: sessions.length,
+      escalated: escalated.length,
+      rate: ratio(escalated.length, sessions.length),
+      reachedAgent: escalated.filter((s) => s.handoff === 'agent').length,
+      queueOnly: escalated.filter((s) => s.handoff === 'queue').length,
+      withIntents: escWithIntents.length,
+      topLastIntent: topLast, topLastCount: topLast ? lasts.get(topLast) : 0,
+      topReason, topReasonLabel: topReason ? escalationLabel(topReason) : null, topReasonCount: topReason ? reasons.get(topReason) : 0,
+      reasonsKnown: [...reasons.values()].reduce((a, b) => a + b, 0),
+    };
+  }
+
   function localDay(d) {
     const x = new Date(d);
     return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
   }
 
-  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, containmentExplanation, abandonment, abandonmentSummary, ABANDON_RULES, NOT_ABANDONED, EXIT_LABEL, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, localDay };
+  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, containmentExplanation, abandonment, abandonmentSummary, ABANDON_RULES, NOT_ABANDONED, EXIT_LABEL, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, isEscalated, ESCALATION_OUTCOMES, escalationOutcome, escalationLabel, lastIntentBeforeEscalation, escalationIntentTable, escalationSummary, localDay };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);

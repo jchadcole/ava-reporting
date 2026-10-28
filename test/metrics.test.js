@@ -156,3 +156,39 @@ test('a not-contained session explains the rule that decided it and why the othe
   assert.match(x.rules[1].why, /because the customer asked for a person, not because of an unsupported intent/);
   assert.equal(M.containmentExplanation(session({ transferred: false, endedNormally: true, analysis: { intents: [{ name: 'A', supported: true, resolved: true, verdict: 'valid' }], transferReason: 'none', misunderstandings: 0 } })), null);
 });
+
+test('escalation: intents driving hand-offs, last intent before the hand-off and reasons', () => {
+  const mk = (id, names, transferred, reason, extra = {}) => ({ id, customerTurns: 3, transferred, handoff: transferred ? 'agent' : 'none', analysis: { intents: names.map((n) => ({ name: n, verdict: n === 'Refund' ? 'not_valid' : 'valid', supported: true, resolved: n !== 'Refund' })), transferReason: reason }, ...extra });
+  const sessions = [
+    mk('a', ['Order status', 'Refund', 'Speak to an agent'], true, 'unsupported_intent'),
+    mk('b', ['Refund'], true, 'user_frustration'),
+    mk('c', ['Refund'], false, 'none'),
+    mk('d', ['Order status'], false, 'none'),
+    mk('e', ['Speak to an agent'], true, 'customer_preference', { handoff: 'queue' }),
+    { id: 'f', customerTurns: 2, transferred: true, handoff: 'agent', pending: true },
+  ];
+  assert.equal(M.isEscalated(sessions[0]), true);
+  assert.equal(M.isEscalated(sessions[2]), false);
+  assert.equal(M.lastIntentBeforeEscalation(sessions[0]), 'Refund');
+  assert.equal(M.lastIntentBeforeEscalation(sessions[4]), 'Speak to an agent');
+  const rows = M.escalationIntentTable(sessions);
+  const refund = rows.find((r) => r.intent === 'Refund');
+  assert.equal(rows[0].intent, 'Refund');
+  assert.equal(refund.escalated, 2);
+  assert.equal(refund.sessions, 3);
+  assert.equal(refund.lastBefore, 2);
+  assert.equal(refund.resolvedRate, 0);
+  assert.ok(Math.abs(refund.shareOfEscalated - 2 / 3) < 1e-9);
+  const order = rows.find((r) => r.intent === 'Order status');
+  assert.equal(order.escalationRate, 0.5);
+  assert.equal(order.lastBefore, 0);
+  const sum = M.escalationSummary(sessions);
+  assert.equal(sum.escalated, 4);
+  assert.equal(sum.reachedAgent, 3);
+  assert.equal(sum.queueOnly, 1);
+  assert.equal(sum.topLastIntent, 'Refund');
+  const g = M.journeyGraph(sessions.filter(M.isEscalated), { outcome: M.escalationOutcome, outcomes: M.ESCALATION_OUTCOMES });
+  assert.equal(g.total, 3);
+  assert.deepEqual(g.nodes.filter((n) => n.kind === 'outcome').map((n) => n.label).sort(), ['Customer asked for a person', 'Customer frustration', 'Unsupported intent']);
+  assert.equal(g.outcomeOrder[0], 'unsupported_intent');
+});

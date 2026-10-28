@@ -9,7 +9,11 @@
   const PAD_Y = 12;
   const LABEL_W = 240; // room for the outcome labels right of the last column
   const CAT = ['var(--cat-1)', 'var(--cat-2)', 'var(--cat-3)', 'var(--cat-4)', 'var(--cat-5)', 'var(--cat-6)'];
-  const OUTCOME_COLOR = { all_valid: 'var(--good)', not_all_valid: 'var(--critical)', customer_left: 'var(--series-unknown)' };
+  const OUTCOME_COLOR = {
+    all_valid: 'var(--good)', not_all_valid: 'var(--critical)', customer_left: 'var(--series-unknown)',
+    // Agent Escalation ends each path in the reason for the hand-off.
+    unsupported_intent: 'var(--accent)', user_frustration: 'var(--critical)', system_error: 'var(--warning)', customer_preference: 'var(--text-2)', unknown: 'var(--series-unknown)',
+  };
 
   const el = (name, attrs = {}) => {
     const n = document.createElementNS(NS, name);
@@ -42,7 +46,7 @@
     const columns = Array.from({ length: cols }, () => []);
     for (const n of graph.nodes) columns[colOf(n)].push(n);
     const rank = (n) => (n.kind === 'other' || n.kind === 'more' ? 1 : 0);
-    const outcomeOrder = ['all_valid', 'not_all_valid', 'customer_left'];
+    const outcomeOrder = graph.outcomeOrder || ['all_valid', 'not_all_valid', 'customer_left'];
     for (const c of columns) c.sort((a, b) => (a.kind === 'outcome' ? outcomeOrder.indexOf(a.key) - outcomeOrder.indexOf(b.key) : rank(a) - rank(b) || b.count - a.count || a.label.localeCompare(b.label)));
     const maxNodes = Math.max(...columns.map((c) => c.length));
     const innerH = height - PAD_Y * 2;
@@ -81,11 +85,19 @@
     return `M${xs},${a} C${mx},${a} ${mx},${b} ${xt},${b} L${xt},${b + width} C${mx},${b + width} ${mx},${a + width} ${xs},${a + width} Z`;
   }
 
+  function defaultNodeExtra(sub) {
+    const valid = sub.filter((p) => p.outcome === 'all_valid').length;
+    const scored = sub.filter((p) => p.outcome === 'all_valid' || p.outcome === 'not_all_valid').length;
+    return [['Valid response to all intents', scored ? pct(valid / scored) : '–']];
+  }
+
   function render(host, graph, opts) {
     const { colors, onFocus, tooltip, hideTooltip, columnLabels } = opts;
+    const nodeExtra = opts.nodeExtra || defaultNodeExtra;
+    const startTitle = opts.startTitle || 'All sessions with intents';
     host.innerHTML = '';
     if (!graph.total) {
-      host.innerHTML = '<div class="empty-state">No analyzed sessions with intents match these filters.</div>';
+      host.innerHTML = `<div class="empty-state">${opts.emptyText || 'No analyzed sessions with intents match these filters.'}</div>`;
       return;
     }
     const width = Math.max(host.clientWidth || 900, 640);
@@ -160,12 +172,8 @@
       const sub = pathsThroughNode(n.id);
       const rows = [['Sessions', n.count.toLocaleString()], ['Share of all sessions', pct(n.count / graph.allTotal)]];
       if (graph.total !== graph.allTotal) rows.push(['Share of focused sessions', pct(n.count / graph.total)]);
-      if (n.kind !== 'outcome') {
-        const valid = sub.filter((p) => p.outcome === 'all_valid').length;
-        const scored = sub.filter((p) => p.outcome === 'all_valid' || p.outcome === 'not_all_valid').length;
-        rows.push(['Valid response to all intents', scored ? pct(valid / scored) : '–']);
-      }
-      tooltip(e, n.kind === 'start' ? 'All sessions with intents' : n.label, rows, n.kind === 'start' ? '' : 'Click to focus on these sessions');
+      if (n.kind !== 'outcome') rows.push(...nodeExtra(sub));
+      tooltip(e, n.kind === 'start' ? startTitle : n.label, rows, n.kind === 'start' ? '' : 'Click to focus on these sessions');
     }
 
     for (const n of graph.nodes) {

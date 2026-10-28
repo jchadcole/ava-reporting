@@ -42,6 +42,7 @@
     expanded: { intents: false, agents: false },
     tab: 'overview',
     journey: { steps: 4, per: 8, focus: [], intents: [], match: 'any', allChips: false }, // focus: [{ id, label }] from clicks on the graph
+    escalation: { steps: 4, per: 8, focus: [], intents: [], match: 'any', allChips: false },
   };
   const TABLE_PREVIEW_ROWS = 10;
   const verdictLabel = (key) => state.data?.verdicts.find((v) => v.key === key)?.label || key;
@@ -76,11 +77,12 @@
     if (p.get('from')) state.from = p.get('from');
     if (p.get('to')) state.to = p.get('to');
     for (const k of Object.keys(state.filters)) if (p.get(k)) state.filters[k] = p.get(k);
-    if (p.get('tab') === 'journey') state.tab = 'journey';
-    if (Number(p.get('steps'))) state.journey.steps = Number(p.get('steps'));
-    if (Number(p.get('per'))) state.journey.per = Number(p.get('per'));
-    if (p.get('jintents')) state.journey.intents = p.get('jintents').split('|');
-    if (p.get('jmatch') === 'all') state.journey.match = 'all';
+    if (['journey', 'escalation'].includes(p.get('tab'))) state.tab = p.get('tab');
+    const flow = state.tab === 'escalation' ? state.escalation : state.journey;
+    if (Number(p.get('steps'))) flow.steps = Number(p.get('steps'));
+    if (Number(p.get('per'))) flow.per = Number(p.get('per'));
+    if (p.get('jintents')) flow.intents = p.get('jintents').split('|');
+    if (p.get('jmatch') === 'all') flow.match = 'all';
   }
   function writeHash() {
     const p = new URLSearchParams();
@@ -91,12 +93,13 @@
       if (state.to) p.set('to', state.to);
     }
     for (const [k, v] of Object.entries(state.filters)) if (v) p.set(k, v);
-    if (state.tab === 'journey') {
-      p.set('tab', 'journey');
-      p.set('steps', state.journey.steps);
-      p.set('per', state.journey.per);
-      if (state.journey.intents.length) p.set('jintents', state.journey.intents.join('|'));
-      if (state.journey.match === 'all') p.set('jmatch', 'all');
+    if (state.tab in FLOWS) {
+      const flow = state[state.tab];
+      p.set('tab', state.tab);
+      p.set('steps', flow.steps);
+      p.set('per', flow.per);
+      if (flow.intents.length) p.set('jintents', flow.intents.join('|'));
+      if (flow.match === 'all') p.set('jmatch', 'all');
     }
     history.replaceState(null, '', `#${p.toString()}`);
   }
@@ -221,11 +224,8 @@
     renderAgents(M.agentTable(state.filtered));
     renderSessions();
     renderDefinitions();
-    if (state.tab === 'journey') {
-      // Don't redraw the graph under the pointer while new analyses stream in; catch up on leave.
-      if (journeyHover) journeyStale = true;
-      else renderJourney();
-    }
+    // Don't redraw a graph under the pointer while new analyses stream in; catch up on leave.
+    if (state.tab in FLOWS) refreshFlow(state.tab);
   }
 
   function renderKpis(s) {
@@ -589,49 +589,96 @@
     document.querySelectorAll('.tab').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
     $('view-overview').hidden = tab !== 'overview';
     $('view-journey').hidden = tab !== 'journey';
+    $('view-escalation').hidden = tab !== 'escalation';
     writeHash();
-    if (tab === 'journey' && state.data) renderJourney();
+    if (tab in FLOWS && state.data) renderFlow(tab);
   }
 
-  let journeyHover = false;
-  let journeyStale = false;
+  // Journey Flows and Agent Escalation share one flow graph renderer. Each flow has its own
+  // controls, intent chips, focus and table, keyed by `name` in state and in FLOWS.
+  const FLOWS = {
+    journey: {
+      ids: { graph: 'journey', steps: 'j-steps', per: 'j-per', intents: 'journey-intents', focus: 'journey-focus', count: 'journey-count', paths: 'journey-paths' },
+      sessions: () => state.filtered,
+      graphOpts: {},
+      lastColumn: 'Outcome',
+      pathCols: {
+        head: '<th class="num">Valid to all intents</th>',
+        cells: (r) => rateCell(r.allValidRate),
+      },
+    },
+    escalation: {
+      ids: { graph: 'escalation', steps: 'esc-steps', per: 'esc-per', intents: 'esc-intents', focus: 'esc-focus', count: 'esc-count', paths: 'esc-paths' },
+      sessions: () => state.filtered.filter(M.isEscalated),
+      graphOpts: { outcome: M.escalationOutcome, outcomes: M.ESCALATION_OUTCOMES },
+      lastColumn: 'Escalation reason',
+      startTitle: 'All escalated sessions with intents',
+      emptyText: 'No escalated sessions with intents match these filters. Escalations appear here once Claude has read them.',
+      nodeExtra: (sub) => {
+        const counts = new Map();
+        for (const p of sub) if (p.outcome !== 'unknown') counts.set(p.outcome, (counts.get(p.outcome) || 0) + 1);
+        const top = [...counts].sort((x, y) => y[1] - x[1])[0];
+        return top ? [['Main escalation reason', `${M.escalationLabel(top[0])} (${pct(top[1] / sub.length)})`]] : [];
+      },
+      pathCols: {
+        head: '<th>Main reason</th><th class="num">Reached an agent</th>',
+        cells: (r, list) => {
+          const counts = new Map();
+          for (const s of list) { const o = M.escalationOutcome(s); if (o !== 'unknown') counts.set(o, (counts.get(o) || 0) + 1); }
+          const top = [...counts].sort((x, y) => y[1] - x[1])[0];
+          const agent = list.filter((s) => s.handoff === 'agent').length;
+          return `<td>${top ? esc(M.escalationLabel(top[0])) : '<span class="muted">–</span>'}</td>${rateCell(list.length ? agent / list.length : null)}`;
+        },
+      },
+      before: () => { renderEscalationKpis(); renderEscalationIntents(); },
+    },
+  };
+  const flowHover = { journey: false, escalation: false };
+  const flowStale = { journey: false, escalation: false };
 
-  function focusJourney(id, label) {
-    if (!state.journey.focus.some((f) => f.id === id)) state.journey.focus.push({ id, label });
-    renderJourney();
+  // Redraw a flow unless the pointer is on its graph; then catch up when the pointer leaves.
+  function refreshFlow(name) {
+    if (flowHover[name]) flowStale[name] = true;
+    else renderFlow(name);
   }
 
-  function renderJourney() {
-    const j = state.journey;
-    $('j-steps').value = String(j.steps);
-    $('j-per').value = String(j.per);
-    const opts = { maxSteps: j.steps, maxPerStep: j.per };
-    renderIntentPicker();
+  function renderFlow(name) {
+    const f = FLOWS[name];
+    const j = state[name];
+    if (f.before) f.before();
+    $(f.ids.steps).value = String(j.steps);
+    $(f.ids.per).value = String(j.per);
+    const opts = { ...f.graphOpts, maxSteps: j.steps, maxPerStep: j.per };
+    const all = f.sessions();
+    renderIntentPicker(name, all);
     // The intent picker narrows the sessions first; colors still come from all of them,
     // so an intent keeps its color whichever intents are picked.
-    const base = M.withIntents(state.filtered, j.intents, j.match);
-    const colors = window.AvaJourney.colorMap(M.journeyGraph(state.filtered, opts));
-    const full = M.journeyGraph(base, opts);
-    const graph = M.journeyGraph(base, { ...opts, focus: j.focus.map((f) => f.id) });
-    const allWithIntents = j.intents.length ? M.journeyGraph(state.filtered, opts).total : full.total;
-    $('journey-count').textContent = graph.total === allWithIntents ? `(${num(graph.total)} sessions)` : `(${num(graph.total)} of ${num(allWithIntents)} sessions)`;
-    const crumbs = $('journey-focus');
+    const base = M.withIntents(all, j.intents, j.match);
+    const allGraph = M.journeyGraph(all, opts);
+    const colors = window.AvaJourney.colorMap(allGraph);
+    const graph = M.journeyGraph(base, { ...opts, focus: j.focus.map((x) => x.id) });
+    $(f.ids.count).textContent = graph.total === allGraph.total ? `(${num(graph.total)} sessions)` : `(${num(graph.total)} of ${num(allGraph.total)} sessions)`;
+    const crumbs = $(f.ids.focus);
     crumbs.hidden = !j.focus.length;
-    crumbs.innerHTML = j.focus.length ? `<span class="muted small">Focused on</span>${j.focus.map((f, i) => `<span class="crumb">${esc(f.label)}<button type="button" data-i="${i}" aria-label="Remove ${esc(f.label)}">✕</button></span>`).join('')}<button type="button" class="btn btn-ghost" id="j-clear">Show all</button>` : '';
-    crumbs.querySelectorAll('button[data-i]').forEach((b) => b.addEventListener('click', () => { j.focus.splice(Number(b.dataset.i), 1); renderJourney(); }));
-    if (j.focus.length) $('j-clear').addEventListener('click', () => { j.focus = []; renderJourney(); });
-    const stepLabel = (i, cols) => (i === 0 ? 'Start' : i === cols - 1 ? 'Outcome' : i > j.steps ? 'Later' : `Intent ${i}`);
-    window.AvaJourney.render($('journey'), graph, { colors, onFocus: focusJourney, tooltip: showTooltip, hideTooltip, columnLabels: stepLabel });
-    renderTopPaths(graph);
+    crumbs.innerHTML = j.focus.length ? `<span class="muted small">Focused on</span>${j.focus.map((x, i) => `<span class="crumb">${esc(x.label)}<button type="button" data-i="${i}" aria-label="Remove ${esc(x.label)}">✕</button></span>`).join('')}<button type="button" class="btn btn-ghost" data-clear>Show all</button>` : '';
+    crumbs.querySelectorAll('button[data-i]').forEach((b) => b.addEventListener('click', () => { j.focus.splice(Number(b.dataset.i), 1); renderFlow(name); }));
+    if (j.focus.length) crumbs.querySelector('[data-clear]').addEventListener('click', () => { j.focus = []; renderFlow(name); });
+    const stepLabel = (i, cols) => (i === 0 ? 'Start' : i === cols - 1 ? f.lastColumn : i > j.steps ? 'Later' : `Intent ${i}`);
+    const onFocus = (id, label) => {
+      if (!j.focus.some((x) => x.id === id)) j.focus.push({ id, label });
+      renderFlow(name);
+    };
+    window.AvaJourney.render($(f.ids.graph), graph, { colors, onFocus, tooltip: showTooltip, hideTooltip, columnLabels: stepLabel, nodeExtra: f.nodeExtra, startTitle: f.startTitle, emptyText: f.emptyText });
+    renderTopPaths(name, graph, all);
     writeHash();
   }
 
-  // Toggle chips for every intent in the filtered sessions, most common first.
+  // Toggle chips for every intent in the flow's sessions, most common first.
   const CHIP_PREVIEW = 16;
-  function renderIntentPicker() {
-    const j = state.journey;
-    const rows = M.intentTable(state.filtered);
-    const host = $('journey-intents');
+  function renderIntentPicker(name, sessions) {
+    const j = state[name];
+    const rows = M.intentTable(sessions);
+    const host = $(FLOWS[name].ids.intents);
     if (!rows.length) {
       host.innerHTML = '';
       return;
@@ -639,38 +686,94 @@
     const shown = j.allChips ? rows : rows.filter((r, i) => i < CHIP_PREVIEW || j.intents.includes(r.intent));
     host.innerHTML = `<div class="ji-head"><span class="small cell-strong">Intents</span>
         <span class="muted small">${j.intents.length ? `Showing sessions with ${j.intents.length > 1 ? `${j.match === 'all' ? 'all' : 'any'} of these ${j.intents.length} intents` : 'this intent'}` : 'Select intents to show only the sessions that include them'}</span>
-        ${j.intents.length > 1 ? `<select id="ji-match" aria-label="Match"><option value="any">Any selected</option><option value="all">All selected</option></select>` : ''}
-        ${j.intents.length ? '<button type="button" class="btn btn-ghost" id="ji-clear">Clear</button>' : ''}</div>
+        ${j.intents.length > 1 ? `<select data-match aria-label="Match"><option value="any">Any selected</option><option value="all">All selected</option></select>` : ''}
+        ${j.intents.length ? '<button type="button" class="btn btn-ghost" data-clear>Clear</button>' : ''}</div>
       <div class="ji-chips" role="group" aria-label="Filter the journeys by intent">${shown.map((r) => `<button type="button" class="ji-chip" aria-pressed="${j.intents.includes(r.intent)}" data-intent="${esc(r.intent)}">${esc(r.intent)} <span class="muted">${num(r.sessions)}</span></button>`).join('')}
-      ${rows.length > CHIP_PREVIEW ? `<button type="button" class="btn btn-ghost" id="ji-more">${j.allChips ? 'Show fewer' : `Show all ${rows.length}`}</button>` : ''}</div>`;
+      ${rows.length > CHIP_PREVIEW ? `<button type="button" class="btn btn-ghost" data-more>${j.allChips ? 'Show fewer' : `Show all ${rows.length}`}</button>` : ''}</div>`;
     host.querySelectorAll('.ji-chip').forEach((b) => b.addEventListener('click', () => {
-      const name = b.dataset.intent;
-      j.intents = j.intents.includes(name) ? j.intents.filter((n) => n !== name) : [...j.intents, name];
+      const n = b.dataset.intent;
+      j.intents = j.intents.includes(n) ? j.intents.filter((x) => x !== n) : [...j.intents, n];
       j.focus = [];
-      renderJourney();
+      renderFlow(name);
     }));
-    if ($('ji-match')) {
-      $('ji-match').value = j.match;
-      $('ji-match').addEventListener('change', (e) => { j.match = e.target.value; j.focus = []; renderJourney(); });
+    const match = host.querySelector('[data-match]');
+    if (match) {
+      match.value = j.match;
+      match.addEventListener('change', (e) => { j.match = e.target.value; j.focus = []; renderFlow(name); });
     }
-    if ($('ji-clear')) $('ji-clear').addEventListener('click', () => { j.intents = []; j.focus = []; renderJourney(); });
-    if ($('ji-more')) $('ji-more').addEventListener('click', () => { j.allChips = !j.allChips; renderJourney(); });
+    host.querySelector('[data-clear]')?.addEventListener('click', () => { j.intents = []; j.focus = []; renderFlow(name); });
+    host.querySelector('[data-more]')?.addEventListener('click', () => { j.allChips = !j.allChips; renderFlow(name); });
   }
 
-  function renderTopPaths(graph) {
+  function renderTopPaths(name, graph, sessions) {
+    const f = FLOWS[name];
     const ids = new Set(graph.paths.map((p) => p.sessionId));
-    const rows = M.topPaths(state.filtered.filter((s) => ids.has(s.id)));
-    const el = $('journey-paths');
-    el.innerHTML = '<thead><tr><th>Intents in order</th><th class="num">Sessions</th><th class="num">Share of all</th><th class="num">Valid to all intents</th></tr></thead><tbody>' +
-      (rows.length ? rows.map((r, i) => `<tr data-i="${i}" tabindex="0"><td><div class="path-cell">${r.path.map((n) => `<span class="chip">${esc(n)}</span>`).join('<span class="path-arrow" aria-hidden="true">→</span>')}</div></td><td class="num">${num(r.sessions)}</td><td class="num">${pct(r.sessions / graph.allTotal, 1)}</td>${rateCell(r.allValidRate)}</tr>`).join('')
-        : '<tr class="empty"><td colspan="4">No journeys match.</td></tr>') + '</tbody>';
+    const inGraph = sessions.filter((s) => ids.has(s.id));
+    const rows = M.topPaths(inGraph);
+    const bySeq = new Map();
+    for (const s of inGraph) {
+      const key = M.sequenceFocus(M.intents(s).map((i) => i.name));
+      if (!bySeq.has(key)) bySeq.set(key, []);
+      bySeq.get(key).push(s);
+    }
+    const el = $(f.ids.paths);
+    const cols = 3 + (f.pathCols.head.match(/<th/g) || []).length;
+    el.innerHTML = `<thead><tr><th>Intents in order</th><th class="num">Sessions</th><th class="num">Share of all</th>${f.pathCols.head}</tr></thead><tbody>` +
+      (rows.length ? rows.map((r, i) => `<tr data-i="${i}" tabindex="0"><td><div class="path-cell">${r.path.map((n) => `<span class="chip">${esc(n)}</span>`).join('<span class="path-arrow" aria-hidden="true">→</span>')}</div></td><td class="num">${num(r.sessions)}</td><td class="num">${pct(r.sessions / graph.allTotal, 1)}</td>${f.pathCols.cells(r, bySeq.get(M.sequenceFocus(r.path)) || [])}</tr>`).join('')
+        : `<tr class="empty"><td colspan="${cols}">No journeys match.</td></tr>`) + '</tbody>';
     // Selecting a row focuses the graph on the sessions with exactly that sequence of intents.
     el.querySelectorAll('tbody tr[data-i]').forEach((tr) => {
       const r = rows[Number(tr.dataset.i)];
       const act = () => {
-        state.journey.focus = [{ id: M.sequenceFocus(r.path), label: r.path.join(' → ') }];
-        renderJourney();
-        $('journey').scrollIntoView({ block: 'start', behavior: 'smooth' });
+        state[name].focus = [{ id: M.sequenceFocus(r.path), label: r.path.join(' → ') }];
+        renderFlow(name);
+        $(f.ids.graph).scrollIntoView({ block: 'start', behavior: 'smooth' });
+      };
+      tr.addEventListener('click', act);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') act(); });
+    });
+  }
+
+  // ---------- Agent Escalation ----------
+  function renderEscalationKpis() {
+    const e = M.escalationSummary(state.filtered);
+    const tiles = [
+      { label: 'Escalated to a person', value: pct(e.rate, 1), meter: e.rate, sub: `${num(e.escalated)} of ${num(e.sessions)} AVA sessions` },
+      { label: 'Reached an agent', value: pct(e.escalated ? e.reachedAgent / e.escalated : null, 1), meter: e.escalated ? e.reachedAgent / e.escalated : null, sub: `${num(e.reachedAgent)} reached an agent · ${num(e.queueOnly)} queue only` },
+      { label: 'Top intent before hand-off', value: e.topLastIntent || '–', sub: e.topLastIntent ? `Last intent in ${num(e.topLastCount)} of ${num(e.withIntents)} escalations with intents` : 'Waiting for Claude’s analysis', small: true },
+      { label: 'Top escalation reason', value: e.topReasonLabel || '–', sub: e.topReasonLabel ? `${num(e.topReasonCount)} of ${num(e.reasonsKnown)} escalations with a reason (${pct(e.topReasonCount / e.reasonsKnown)})` : 'Waiting for Claude’s analysis', small: true },
+    ];
+    $('esc-kpis').innerHTML = tiles
+      .map((t) => `<div class="kpi"><div class="kpi-label">${esc(t.label)}</div><div class="kpi-value${t.small ? ' kpi-text' : ''}" title="${esc(t.value)}">${esc(t.value)}</div>` +
+        (t.meter != null ? `<div class="kpi-meter"><span style="width:${Math.min(100, t.meter * 100).toFixed(1)}%"></span></div>` : '') +
+        `<div class="kpi-sub">${esc(t.sub)}</div></div>`)
+      .join('');
+  }
+
+  function renderEscalationIntents() {
+    const rows = M.escalationIntentTable(state.filtered);
+    const j = state.escalation;
+    const active = (r) => j.intents.length === 1 && j.intents[0] === r.intent;
+    const el = $('esc-intent-table');
+    el.innerHTML = '<thead><tr><th>Intent</th><th class="num">Escalated sessions</th><th class="num">Share of escalations</th><th class="num">Escalation rate</th><th class="num">Last intent before hand-off</th><th class="num">Resolved by the AVA</th><th>Main reason</th></tr></thead><tbody>' +
+      (rows.length ? visibleRows('esc-intent-table', rows, active).map((r) => `<tr data-key="${esc(r.intent)}" class="${active(r) ? 'active' : ''}" tabindex="0">
+          <td class="cell-strong">${esc(r.intent)}</td>
+          <td class="num">${num(r.escalated)}</td>
+          ${rateCell(r.shareOfEscalated)}
+          <td class="num" title="${num(r.escalated)} of ${num(r.sessions)} sessions with this intent">${pct(r.escalationRate)} <span class="muted small">of ${num(r.sessions)}</span></td>
+          <td class="num">${num(r.lastBefore)}</td>
+          ${rateCell(r.resolvedRate)}
+          <td>${r.topReasonLabel ? esc(r.topReasonLabel) : '<span class="muted">–</span>'}</td>
+        </tr>`).join('')
+        : '<tr class="empty"><td colspan="7">No escalated sessions with intents yet.</td></tr>') + '</tbody>';
+    renderShowMore('esc-intent-table', rows.length);
+    el.querySelectorAll('tbody tr[data-key]').forEach((tr) => {
+      const act = () => {
+        const n = tr.dataset.key;
+        j.intents = j.intents.length === 1 && j.intents[0] === n ? [] : [n];
+        j.focus = [];
+        renderFlow('escalation');
+        if (j.intents.length) $('escalation').scrollIntoView({ block: 'start', behavior: 'smooth' });
       };
       tr.addEventListener('click', act);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') act(); });
@@ -741,23 +844,24 @@
     $('f-to').value = state.to || '';
     document.querySelectorAll('.custom-range').forEach((el) => { el.hidden = state.range !== 'custom'; });
     document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
-    $('j-steps').addEventListener('change', (e) => { state.journey.steps = Number(e.target.value); state.journey.focus = []; writeHash(); renderJourney(); });
-    $('j-per').addEventListener('change', (e) => { state.journey.per = Number(e.target.value); state.journey.focus = []; writeHash(); renderJourney(); });
+    for (const [name, f] of Object.entries(FLOWS)) {
+      $(f.ids.steps).addEventListener('change', (e) => { state[name].steps = Number(e.target.value); state[name].focus = []; renderFlow(name); });
+      $(f.ids.per).addEventListener('change', (e) => { state[name].per = Number(e.target.value); state[name].focus = []; renderFlow(name); });
+      $(f.ids.graph).addEventListener('pointerenter', () => { flowHover[name] = true; });
+      $(f.ids.graph).addEventListener('pointerleave', () => {
+        flowHover[name] = false;
+        if (flowStale[name]) { flowStale[name] = false; renderFlow(name); }
+      });
+    }
     let resizeTimer;
-    window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.tab === 'journey' && state.data) renderJourney(); }, 150); });
-    $('journey').addEventListener('pointerenter', () => { journeyHover = true; });
-    $('journey').addEventListener('pointerleave', () => {
-      journeyHover = false;
-      if (journeyStale) { journeyStale = false; renderJourney(); }
-    });
+    window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.tab in FLOWS && state.data) renderFlow(state.tab); }, 150); });
     setTab(state.tab);
     await loadOrgs();
     $('f-org').addEventListener('change', (e) => {
       // AVAs and intents differ between orgs, so start the new org unfiltered.
       state.org = e.target.value;
       for (const k of Object.keys(state.filters)) state.filters[k] = '';
-      state.journey.focus = [];
-      state.journey.intents = [];
+      for (const name of Object.keys(FLOWS)) Object.assign(state[name], { focus: [], intents: [] });
       state.detailCache.clear();
       state.page = 1;
       load();
@@ -786,8 +890,7 @@
     });
     $('f-reset').addEventListener('click', () => {
       for (const k of Object.keys(state.filters)) state.filters[k] = '';
-      state.journey.focus = [];
-      state.journey.intents = [];
+      for (const name of Object.keys(FLOWS)) Object.assign(state[name], { focus: [], intents: [] });
       state.page = 1;
       render();
     });
