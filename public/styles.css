@@ -244,7 +244,7 @@ table.data .empty td { cursor: default; color: var(--muted); text-align: center;
 
 /* View tabs */
 .tabs { display: flex; gap: 4px; max-width: 1440px; margin: 0 auto; padding: 0 24px; }
-#view-overview, #view-journey { display: flex; flex-direction: column; gap: 16px; }
+#view-overview, #view-journey, #view-escalation { display: flex; flex-direction: column; gap: 16px; }
 @media (max-width: 640px) { .tabs { padding: 0 16px; } }
 .tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 12px; font: inherit; font-weight: 500; color: var(--muted); cursor: pointer; margin-bottom: -1px; }
 .tab:hover { color: var(--text); }
@@ -344,7 +344,8 @@ span.v-not_valid { color: var(--critical); font-weight: 600; }
 .card.collapsed .card-head { margin-bottom: 0; }
 .card.collapsed .card-head > :not(h2) { display: none; }
 .card.collapsed > h2 { margin-bottom: 0; }
-.card.collapsed { align-self: start; }
+/* Side by side in a grid, a collapsed card stays short; on its own row it keeps the full width. */
+.grid > .card.collapsed { align-self: start; }
 
 /* Agent Escalation */
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 12px; background: var(--surface); }
