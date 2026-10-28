@@ -41,7 +41,7 @@
     detailCache: new Map(),
     expanded: { intents: false, agents: false },
     tab: 'overview',
-    journey: { steps: 4, per: 8, focus: [] }, // focus: [{ id, label }] from clicks on the graph
+    journey: { steps: 4, per: 8, focus: [], intents: [], match: 'any', allChips: false }, // focus: [{ id, label }] from clicks on the graph
   };
   const TABLE_PREVIEW_ROWS = 10;
   const verdictLabel = (key) => state.data?.verdicts.find((v) => v.key === key)?.label || key;
@@ -79,6 +79,8 @@
     if (p.get('tab') === 'journey') state.tab = 'journey';
     if (Number(p.get('steps'))) state.journey.steps = Number(p.get('steps'));
     if (Number(p.get('per'))) state.journey.per = Number(p.get('per'));
+    if (p.get('jintents')) state.journey.intents = p.get('jintents').split('|');
+    if (p.get('jmatch') === 'all') state.journey.match = 'all';
   }
   function writeHash() {
     const p = new URLSearchParams();
@@ -93,6 +95,8 @@
       p.set('tab', 'journey');
       p.set('steps', state.journey.steps);
       p.set('per', state.journey.per);
+      if (state.journey.intents.length) p.set('jintents', state.journey.intents.join('|'));
+      if (state.journey.match === 'all') p.set('jmatch', 'all');
     }
     history.replaceState(null, '', `#${p.toString()}`);
   }
@@ -521,17 +525,55 @@
     $('j-steps').value = String(j.steps);
     $('j-per').value = String(j.per);
     const opts = { maxSteps: j.steps, maxPerStep: j.per };
-    const full = M.journeyGraph(state.filtered, opts);
-    const graph = M.journeyGraph(state.filtered, { ...opts, focus: j.focus.map((f) => f.id) });
-    $('journey-count').textContent = j.focus.length ? `(${num(graph.total)} of ${num(full.total)} sessions)` : `(${num(full.total)} sessions)`;
+    renderIntentPicker();
+    // The intent picker narrows the sessions first; colors still come from all of them,
+    // so an intent keeps its color whichever intents are picked.
+    const base = M.withIntents(state.filtered, j.intents, j.match);
+    const colors = window.AvaJourney.colorMap(M.journeyGraph(state.filtered, opts));
+    const full = M.journeyGraph(base, opts);
+    const graph = M.journeyGraph(base, { ...opts, focus: j.focus.map((f) => f.id) });
+    const allWithIntents = j.intents.length ? M.journeyGraph(state.filtered, opts).total : full.total;
+    $('journey-count').textContent = graph.total === allWithIntents ? `(${num(graph.total)} sessions)` : `(${num(graph.total)} of ${num(allWithIntents)} sessions)`;
     const crumbs = $('journey-focus');
     crumbs.hidden = !j.focus.length;
     crumbs.innerHTML = j.focus.length ? `<span class="muted small">Focused on</span>${j.focus.map((f, i) => `<span class="crumb">${esc(f.label)}<button type="button" data-i="${i}" aria-label="Remove ${esc(f.label)}">✕</button></span>`).join('')}<button type="button" class="btn btn-ghost" id="j-clear">Show all</button>` : '';
     crumbs.querySelectorAll('button[data-i]').forEach((b) => b.addEventListener('click', () => { j.focus.splice(Number(b.dataset.i), 1); renderJourney(); }));
     if (j.focus.length) $('j-clear').addEventListener('click', () => { j.focus = []; renderJourney(); });
     const stepLabel = (i, cols) => (i === 0 ? 'Start' : i === cols - 1 ? 'Outcome' : i > j.steps ? 'Later' : `Intent ${i}`);
-    window.AvaJourney.render($('journey'), graph, { colors: window.AvaJourney.colorMap(full), onFocus: focusJourney, tooltip: showTooltip, hideTooltip, columnLabels: stepLabel });
+    window.AvaJourney.render($('journey'), graph, { colors, onFocus: focusJourney, tooltip: showTooltip, hideTooltip, columnLabels: stepLabel });
     renderTopPaths(graph);
+    writeHash();
+  }
+
+  // Toggle chips for every intent in the filtered sessions, most common first.
+  const CHIP_PREVIEW = 16;
+  function renderIntentPicker() {
+    const j = state.journey;
+    const rows = M.intentTable(state.filtered);
+    const host = $('journey-intents');
+    if (!rows.length) {
+      host.innerHTML = '';
+      return;
+    }
+    const shown = j.allChips ? rows : rows.filter((r, i) => i < CHIP_PREVIEW || j.intents.includes(r.intent));
+    host.innerHTML = `<div class="ji-head"><span class="small cell-strong">Intents</span>
+        <span class="muted small">${j.intents.length ? `Showing sessions with ${j.intents.length > 1 ? `${j.match === 'all' ? 'all' : 'any'} of these ${j.intents.length} intents` : 'this intent'}` : 'Select intents to show only the sessions that include them'}</span>
+        ${j.intents.length > 1 ? `<select id="ji-match" aria-label="Match"><option value="any">Any selected</option><option value="all">All selected</option></select>` : ''}
+        ${j.intents.length ? '<button type="button" class="btn btn-ghost" id="ji-clear">Clear</button>' : ''}</div>
+      <div class="ji-chips" role="group" aria-label="Filter the journeys by intent">${shown.map((r) => `<button type="button" class="ji-chip" aria-pressed="${j.intents.includes(r.intent)}" data-intent="${esc(r.intent)}">${esc(r.intent)} <span class="muted">${num(r.sessions)}</span></button>`).join('')}
+      ${rows.length > CHIP_PREVIEW ? `<button type="button" class="btn btn-ghost" id="ji-more">${j.allChips ? 'Show fewer' : `Show all ${rows.length}`}</button>` : ''}</div>`;
+    host.querySelectorAll('.ji-chip').forEach((b) => b.addEventListener('click', () => {
+      const name = b.dataset.intent;
+      j.intents = j.intents.includes(name) ? j.intents.filter((n) => n !== name) : [...j.intents, name];
+      j.focus = [];
+      renderJourney();
+    }));
+    if ($('ji-match')) {
+      $('ji-match').value = j.match;
+      $('ji-match').addEventListener('change', (e) => { j.match = e.target.value; j.focus = []; renderJourney(); });
+    }
+    if ($('ji-clear')) $('ji-clear').addEventListener('click', () => { j.intents = []; j.focus = []; renderJourney(); });
+    if ($('ji-more')) $('ji-more').addEventListener('click', () => { j.allChips = !j.allChips; renderJourney(); });
   }
 
   function renderTopPaths(graph) {
@@ -600,6 +642,7 @@
       state.org = e.target.value;
       for (const k of Object.keys(state.filters)) state.filters[k] = '';
       state.journey.focus = [];
+      state.journey.intents = [];
       state.detailCache.clear();
       state.page = 1;
       load();
@@ -629,6 +672,7 @@
     $('f-reset').addEventListener('click', () => {
       for (const k of Object.keys(state.filters)) state.filters[k] = '';
       state.journey.focus = [];
+      state.journey.intents = [];
       state.page = 1;
       render();
     });

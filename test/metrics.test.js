@@ -106,3 +106,12 @@ test('topPaths ranks full intent sequences', () => {
   assert.equal(top[0].sessions, 2);
   assert.equal(top[0].allValidRate, 0.5);
 });
+
+test('withIntents keeps sessions with any or all of the picked intents', () => {
+  const a = session(analyzed(intent('Renew', 'valid'), intent('Fees', 'valid')));
+  const b = session(analyzed(intent('Renew', 'valid')));
+  const c = session(analyzed(intent('Status', 'valid')));
+  assert.deepEqual(M.withIntents([a, b, c], []), [a, b, c]);
+  assert.deepEqual(M.withIntents([a, b, c], ['Fees', 'Status']), [a, c]);
+  assert.deepEqual(M.withIntents([a, b, c], ['Renew', 'Fees'], 'all'), [a]);
+});

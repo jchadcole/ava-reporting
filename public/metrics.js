@@ -243,6 +243,15 @@
     return out;
   }
 
+  // Sessions that include any (or all) of the given intents; no intents keeps every session.
+  function withIntents(sessions, names = [], match = 'any') {
+    if (!names.length) return sessions;
+    return sessions.filter((s) => {
+      const have = new Set(intents(s).map((i) => i.name));
+      return match === 'all' ? names.every((n) => have.has(n)) : names.some((n) => have.has(n));
+    });
+  }
+
   // The most common full intent sequences, for the table under the graph.
   function topPaths(sessions, limit = 15) {
     const rows = new Map();
@@ -265,7 +274,7 @@
     return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
   }
 
-  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, journeyGraph, linkCounts, topPaths, sequenceFocus, OUTCOMES, localDay };
+  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, localDay };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);
