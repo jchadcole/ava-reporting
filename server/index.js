@@ -6,11 +6,9 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { buildDataset } = require('./dataset');
-const { getSessionDetail } = require('./detail');
+const { fetchTurns } = require('./detail');
 const { getOrg, listOrgs } = require('./orgs');
-const { buildVerification } = require('./verify');
-const { buildEscalations } = require('./escalations');
+const { buildAvaTurns, avaResponse } = require('./ava');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -56,52 +54,27 @@ async function handleApi(req, res, url) {
 
   const org = getOrg(url.searchParams.get('org'));
 
-  if (url.pathname === '/api/dataset') {
+  // Dashboard v2: AVA sessions, with intent analyses merged in fresh on every call so the
+  // page can poll while they're being worked through.
+  if (url.pathname === '/api/ava') {
     const start = url.searchParams.get('start');
     const end = url.searchParams.get('end');
     const startMs = Date.parse(start);
     const endMs = Date.parse(end);
     if (Number.isNaN(startMs) || Number.isNaN(endMs) || startMs >= endMs) return sendJson(res, 400, { error: 'start and end must be ISO timestamps with start before end' });
     if (endMs - startMs > MAX_RANGE_DAYS * 86_400_000) return sendJson(res, 400, { error: `Date range is limited to ${MAX_RANGE_DAYS} days` });
-    const key = `dataset:${org.key}:${new Date(startMs).toISOString()}:${new Date(endMs).toISOString()}`;
-    return sendJson(res, 200, await cached(key, () => buildDataset(org.client, start, end)));
+    const key = `ava:${org.key}:${new Date(startMs).toISOString()}:${new Date(endMs).toISOString()}`;
+    const build = await cached(key, () => buildAvaTurns(org.client, start, end));
+    return sendJson(res, 200, avaResponse(org.key, build));
   }
 
-  if (url.pathname === '/api/escalations') {
-    const start = url.searchParams.get('start');
-    const end = url.searchParams.get('end');
-    const startMs = Date.parse(start);
-    const endMs = Date.parse(end);
-    if (Number.isNaN(startMs) || Number.isNaN(endMs) || startMs >= endMs) return sendJson(res, 400, { error: 'start and end must be ISO timestamps with start before end' });
-    if (endMs - startMs > MAX_RANGE_DAYS * 86_400_000) return sendJson(res, 400, { error: `Date range is limited to ${MAX_RANGE_DAYS} days` });
-    const range = `${new Date(startMs).toISOString()}:${new Date(endMs).toISOString()}`;
-    // Shares the dataset cache entry with /api/dataset, so the session list and this view agree.
-    const dataset = await cached(`dataset:${org.key}:${range}`, () => buildDataset(org.client, start, end));
-    return sendJson(res, 200, await cached(`escalations:${org.key}:${range}`, () => buildEscalations(org.client, org.key, dataset)));
-  }
-
-  if (url.pathname === '/api/verify') {
-    const start = url.searchParams.get('start');
-    const end = url.searchParams.get('end');
-    const bot = url.searchParams.get('bot') || null;
-    const preview = url.searchParams.get('preview') || 'include';
-    if (!['exclude', 'include', 'only'].includes(preview)) return sendJson(res, 400, { error: 'preview must be exclude, include or only' });
-    if (Number.isNaN(Date.parse(start)) || Number.isNaN(Date.parse(end))) return sendJson(res, 400, { error: 'start and end must be ISO timestamps' });
-    if (bot && !ID_PATTERN.test(bot)) return sendJson(res, 400, { error: 'Invalid bot' });
-    const key = `verify:${org.key}:${start}:${end}:${bot}:${preview}`;
-    return sendJson(res, 200, await cached(key, () => buildVerification(org.client, start, end, bot, preview)));
-  }
-
-  if (url.pathname === '/api/session') {
-    const params = {};
-    for (const name of ['conversationId', 'botId', 'sessionId']) {
-      const value = url.searchParams.get(name);
-      if (value && !ID_PATTERN.test(value)) return sendJson(res, 400, { error: `Invalid ${name}` });
-      params[name] = value;
-    }
-    if (!params.conversationId && !params.sessionId) return sendJson(res, 400, { error: 'conversationId or sessionId is required' });
-    const key = `session:${org.key}:${params.conversationId}:${params.botId}:${params.sessionId}`;
-    return sendJson(res, 200, await cached(key, () => getSessionDetail(org.client, params)));
+  if (url.pathname === '/api/ava/session') {
+    const botId = url.searchParams.get('botId');
+    const sessionId = url.searchParams.get('sessionId');
+    if (!botId || !sessionId || !ID_PATTERN.test(botId) || !ID_PATTERN.test(sessionId)) return sendJson(res, 400, { error: 'botId and sessionId are required' });
+    const turns = await cached(`ava-session:${org.key}:${botId}:${sessionId}`, () => fetchTurns(org.client.request, botId, sessionId));
+    // Only the AVA's turns; classic bot steps in the same flow are left out.
+    return sendJson(res, 200, { sessionId, turns: turns.filter((t) => t.virtualAgent) });
   }
 
   return sendJson(res, 404, { error: 'Not found' });

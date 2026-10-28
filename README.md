@@ -1,61 +1,56 @@
 # ava-reporting
 
-Custom reporting for Genesys Cloud virtual agents (bots and AI Virtual Agents). One dashboard shows containment and intent performance, with a filterable list of every bot session underneath and a drill-down into each one.
+Reporting for Genesys Cloud Agentic Virtual Agents (AVAs). This is dashboard v2: it covers only the AVA part of each session. For every AVA session it lists the intents the customer raised and whether the AVA gave a valid response to each one. Classic bot metrics (containment, recognition failures, exit reasons) and the Escalations tab are in v1, kept on the `release-v1.0.0` branch.
 
 ## What's on the dashboard
 
-- **Genesys org**: pick which org to report on when more than one is configured (see [Several orgs](#several-orgs)).
-- **Filters**: date range (presets or custom, up to 92 days), virtual agent, channel, intent, outcome (contained or escalated), bot exit reason, recognition failure, intents per session (none, one, more than one), and preview sessions (test sessions from Architect's preview mode, left out by default). Filters apply to every panel and are kept in the URL, so a filtered view can be bookmarked.
-- **Key metrics**: bot sessions, containment rate, sessions that reached an agent, query self-service rate, intent recognition rate, recognition failure rate, turns per session, median session length, and bot response time (median and longest).
-- **Sessions per day**: contained versus escalated.
-- **Why sessions left the bot**: Genesys bot results (customer asked to leave, bot handed back, customer disconnected, recognition failure exits, errors). Select a bar to filter.
-- **Intent performance**: per intent, its sessions, matches (counting repeats within a session), share, containment, agent rate, turns, recognition failures, and how often it was the final intent.
-- **Recognition failures**: no-match versus no-input.
-- **Virtual agents**: the same metrics per bot, including median and longest bot response time.
-- **Sessions**: sortable, searchable by conversation ID, exportable to CSV. Each session shows its intents in the order they were recognized (looping bots such as Navigator can match several) and its median and longest bot response time. Selecting a session opens its conversation path (call flow, bot, queue, agent, survey) and the turn-by-turn transcript with intents, confidence, slots, AVA tool calls and guardrail events. Card numbers, PINs and sensitive slot values are masked.
+- **Filters**: Genesys org, date range (up to the last 10 days, since that is all the turn data Genesys keeps), AVA, channel, intent, valid response to all intents (yes, no, customer left first, no request, not analyzed yet), intent response (has a valid, partly valid or not valid one), Genesys flags, and preview sessions (left out by default). Filters apply to every panel and are kept in the URL.
+- **Key metrics** (Overview tiles): AVA sessions, contained, abandoned, intents detected, tool call success and guardrail blocks. Every panel below the tiles can be collapsed from its heading, and the browser remembers which are collapsed.
+- **Containment**: contained and not-contained sessions by the rule that decided them (full task resolution, graceful partial containment, self-service deflection; or a supported intent not resolved, a transfer after an error or repeated misunderstanding, and so on), abandoned sessions by rule (frustration abandon, dead-end abandon, premature drop-off; or an escalation, deflection or other ending), and why transferred sessions went to a person. The rules and where each input comes from are on the page.
+- **Intents**: each intent with its sessions and how many responses were valid, partly valid, not valid, or cut off because the customer left. Select a row to filter.
+- **How the AVA responded to each intent**: the four verdicts across all intents. Select one to filter.
+- **AVAs**: the same per AVA (all versions together), with tool calls, tool failures and guardrail blocks.
+- **AVA sessions**: sortable, searchable by conversation ID, exportable to CSV. Each row shows the intents in the order raised, colored by verdict (hover for Claude's reason), and whether every intent got a valid response. Selecting a session opens each intent with its verdict and reason, and the AVA-only transcript with tool calls, guardrail events and reply times.
 
-The definitions behind each number are at the bottom of the page.
+These are on the **Overview** tab. The definitions behind each number are at the bottom of the page.
 
-**Escalations** (second tab) explains why sessions went to a person. Every escalated session (its conversation reached a queue or an agent) gets a reason category, a one- or two-sentence explanation, and who started the hand-off (the customer or the virtual agent), with a chart of how often each reason occurs. The categories are: AVA couldn’t resolve it, hand-off by design, customer wanted a person, illegal or dangerous request, customer may be in danger, and other or unclear. Select a bar to filter the list, and a row to open its transcript.
+**Journey Flows** (second tab) draws every session's intents as a flow graph: from Start, through the first, second, third intent and so on in the order the customer raised them, to the session's outcome (valid to all intents, not valid to all, or customer left first). Node and line thickness is the number of sessions, and each node shows its share of all sessions with intents. Hover a node or line to trace its sessions through the rest of the graph and see counts in a tooltip. Click it to focus the graph on just those sessions; it re-lays itself out, and focuses can be stacked or removed. Intent chips above the graph show only the sessions that include any (or all) of the selected intents. Steps beyond the chosen number fold into "More intents", and less common intents at each step fold into "Other intents". Below the graph, the most common full journeys are listed with their share and valid-to-all rate; selecting one focuses the graph on it. The same filters apply to both tabs.
 
-The reasons come from Claude reading the session’s bot transcript (`server/escalations.js`). This sends conversation content to Anthropic’s API, so it only runs when `ANTHROPIC_API_KEY` is set. Before anything is sent, long digit runs such as card and account numbers are masked. When Genesys no longer has the transcript (turn data is kept for about 10 days), Genesys’s own AI conversation summary is used instead, where the org has one. Each session is analyzed once and the result is saved in `data/escalation-analyses.json`. Without a key, the tab lists Genesys’s summary reason where there is one.
+**Agent Escalation** (third tab) covers every session handed to a person after the AVA (Genesys shows a queue or agent after the AVA started), whether the customer asked or the AVA handed off on its own. **Intents before the hand-off** (the default view) draws the intents raised before the hand-off: those before the customer's first request for a person (an intent such as "Speak to a person", or Genesys AgentRequestedByUser), or every intent when there was no request. Each path ends in how the AVA answered the intent right before the hand-off (not valid, partial, answered but still escalated, or escalated before the AVA answered). Tiles give the escalation rate, who asked for the person, the intent most often right before the hand-off, and how often the hand-off followed a not-valid or partial answer. "Intents leading to escalation" ranks each intent by escalated sessions, with its escalation rate, how often it was right before the hand-off, a bar of how the AVA answered it, the not-valid, not-resolved and customer-asked rates, and the main transfer reason. Selecting a row filters the graph and lists Claude's note on the AVA's answer in each of those sessions, worst first, with a link to the session. **Escalation reasons** ends each path in Claude's transfer reason instead, with a ranked table of the intents in escalated sessions.
 
-**Check against Genesys** (top right) compares the dashboard's totals with Genesys's own analytics for the same org, time range and virtual agent: sessions, turns, exits, disconnects, recognition failures, self-served questions, conversations, conversations that reached an agent, and sessions per intent. Genesys's figures come from separate aggregate and conversation-detail queries (`server/verify.js`), so a mistake in how the dashboard merges or classifies sessions shows up as a difference.
+### Where the intents and verdicts come from
+
+Genesys does not record an intent on AVA turns (it only does for classic NLU bot steps), so `server/ava.js` sends each session's AVA transcript to Claude, which lists the intents and judges the response to each as valid, partly valid, not valid, or customer left first. The transcript includes what Genesys recorded on each turn (tool calls and their status, guardrail blocks, errors, the customer saying nothing). Long digit runs such as card numbers and PINs are masked first. Claude is shown the intent names already used for the same AVA so a request keeps the same name across sessions.
+
+This only runs when `ANTHROPIC_API_KEY` is set. Analyses run in the background, newest sessions first, up to `MAX_AVA_ANALYSES` per date range load (press Refresh to continue), and the page fills in as they finish. Each session is analyzed once and saved in `data/ava-analyses.json`; it is redone only if more turns arrive. Without a key, sessions still show Genesys's own flags.
 
 ## How it works
 
 ```
-browser ── /api/dataset, /api/session ──▶ Node server ── OAuth client credentials ──▶ Genesys Cloud
+browser ── /api/ava, /api/ava/session ──▶ Node server ── OAuth client credentials ──▶ Genesys Cloud
+                                                   └──── masked AVA transcripts ──▶ Claude (optional)
 ```
-
-The server is a small Node app with no dependencies. It holds the OAuth client secret and only makes read-only calls:
 
 | Data | Genesys API |
 | --- | --- |
-| One row per bot session: turns, length, exit, intents, final intent, recognition failures, self-served queries | `POST /api/v2/analytics/bots/aggregates/query` grouped by `botSessionId` |
-| Session start time and whether the conversation reached a queue or agent | `POST /api/v2/analytics/conversations/details/query` (segment `purpose=botflow`) |
-| Drill-down conversation path | `GET /api/v2/analytics/conversations/{id}/details` |
-| Bot response time per customer turn | `GET /api/v2/analytics/botflows/{botId}/reportingturns?interval=…` for each bot in the range |
+| Bot names and flow types; preview sessions | `POST /api/v2/analytics/bots/aggregates/query` |
+| Every AVA turn in the range (turns whose ask action carries `agentDetails`) | `GET /api/v2/analytics/botflows/{botId}/reportingturns?interval=…` for each bot |
+| Whether the conversation reached a queue or agent after the AVA (transfers for containment) | `POST /api/v2/analytics/conversations/details/query` (segment `purpose=botflow`) |
 | Drill-down transcript | `GET /api/v2/analytics/botflows/{botId}/reportingturns?sessionId=…` |
-| Genesys AI summary and contact reason for escalated sessions | `GET /api/v2/conversations/{id}/summaries` |
 
-The browser receives the session rows for the selected date range once and computes every panel locally (`public/metrics.js`), so changing a filter is instant and all panels agree. Results are cached on the server for two minutes.
-
-Containment uses conversation detail: a session is **contained** when the conversation never reached a queue or an agent. Conversation detail is capped (5,000 conversations by default); beyond that, a disconnect inside the bot counts as contained and an exit back to the flow counts as escalated, and the dashboard says how many sessions were estimated.
-
-Bot response time is measured per customer turn, from when Genesys captured the customer's input (`dateCreated`) to when the bot had its reply ready (`dateCompleted`). In testing, Genesys returned turn-level data for only about the last 10 days, and sessions where the customer never replied have no turn to time, so the dashboard says how many sessions the figures cover.
+The browser receives the AVA session rows for the date range and computes every panel locally (`public/metrics.js`). Turn data is cached on the server for two minutes.
 
 ## Running it
 
 Requires Node 20 or later.
 
 ```sh
-npm install            # the Anthropic SDK, used for the Escalations tab
+npm install            # the Anthropic SDK, used for the intent analysis
 cp .env.example .env   # fill in the Genesys OAuth client
 npm start              # same as: node --env-file=.env server/index.js → http://127.0.0.1:3000
 ```
 
-The OAuth client needs read access to analytics (conversation details, bot aggregates and bot reporting turns), flows and users.
+The OAuth client needs read access to analytics (bot aggregates, bot reporting turns and conversation details).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -65,16 +60,16 @@ The OAuth client needs read access to analytics (conversation details, bot aggre
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Where the server listens |
 | `DASHBOARD_USER`, `DASHBOARD_PASSWORD` | unset | Turn on HTTP basic auth. Set these, or put the app behind SSO, before exposing it beyond your machine. |
 | `MAX_RANGE_DAYS` | `92` | Longest date range allowed |
-| `MAX_DETAIL_CONVERSATIONS` | `5000` | Conversation detail cap per request |
-| `MAX_TURN_PAGES_PER_BOT` | `40` | Pages of 250 turns read per bot for response times |
+| `MAX_DETAIL_CONVERSATIONS` | `5000` | Conversation detail cap per load; beyond it, transfers come only from the AVA's own ending |
+| `MAX_TURN_PAGES_PER_BOT` | `40` | Pages of 250 turns read per bot |
 | `EXCLUDE_BOT_TYPES` | `VOICESURVEY` | Bot flow types left out of the report |
 | `MASK_SENSITIVE` | `true` | Mask long digit runs and sensitive slots in transcripts |
 | `CACHE_TTL_SECONDS` | `120` | Server-side cache lifetime |
-| `ANTHROPIC_API_KEY` | unset | Turns on the escalation reason analysis (sends masked transcripts of escalated sessions to Anthropic) |
-| `ESCALATION_MODEL` | `claude-opus-5-5` | Claude model used for the analysis |
-| `ESCALATION_ANALYSIS` | on | Set to `off` to stop sending transcripts even when a key is set |
-| `MAX_ESCALATION_SESSIONS` | `300` | Most recent escalated sessions analyzed per date range |
-| `ESCALATION_CACHE_FILE` | `data/escalation-analyses.json` | Where saved analyses are kept |
+| `ANTHROPIC_API_KEY` | unset | Turns on the intent analysis (sends masked AVA transcripts to Anthropic) |
+| `AVA_MODEL` | `claude-opus-5-5` | Claude model used for the analysis |
+| `AVA_ANALYSIS` | on | Set to `off` to stop sending transcripts even when a key is set |
+| `MAX_AVA_ANALYSES` | `300` | Sessions analyzed per date range load, newest first |
+| `AVA_CACHE_FILE` | `data/ava-analyses.json` | Where saved analyses are kept |
 
 ## Several orgs
 
@@ -93,11 +88,7 @@ GENESYS_ACME_REGION=usw2.pure.cloud
 GENESYS_ACME_LABEL=Acme Health   # optional longer name for the picker
 ```
 
-Variable names use the org name in uppercase, with spaces and other symbols turned into `_`. The org picker shows the names in the order listed; credentials never reach the browser. With `GENESYS_ORGS` unset, the single-org `GENESYS_CLIENT_ID`, `GENESYS_CLIENT_SECRET` and `GENESYS_REGION` are used. `SNAPSHOT_ORG=acme npm run snapshot` snapshots a specific org.
-
-## Static snapshot
-
-`npm run snapshot -- 30 60` writes `dist/ava-dashboard-snapshot.html`: the last 30 days with drill-downs for the 60 most recent sessions, as one HTML file that works without the server. Use it for sharing a point-in-time view; it contains real conversation data.
+Variable names use the org name in uppercase, with spaces and other symbols turned into `_`. The org picker shows the names in the order listed; credentials never reach the browser. With `GENESYS_ORGS` unset, the single-org `GENESYS_CLIENT_ID`, `GENESYS_CLIENT_SECRET` and `GENESYS_REGION` are used.
 
 ## Tests
 

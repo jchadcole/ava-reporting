@@ -3,25 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AVA Performance</title>
+  <title>AVA Dashboard</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header class="page-header">
     <div>
-      <h1>AVA Performance</h1>
-      <p class="subtitle" id="subtitle">Containment and intent reporting for Genesys Cloud virtual agents</p>
+      <h1>AVA Dashboard</h1>
+      <p class="subtitle" id="subtitle">Intents and response quality for Genesys Cloud Agentic Virtual Agents</p>
     </div>
     <div class="header-actions">
       <span class="muted" id="updated"></span>
-      <button type="button" class="btn" id="verify">Check against Genesys</button>
       <button type="button" class="btn" id="refresh">Refresh</button>
     </div>
   </header>
 
   <nav class="tabs" id="tabs" role="tablist" aria-label="Views">
     <button type="button" class="tab" role="tab" data-tab="overview" aria-selected="true">Overview</button>
-    <button type="button" class="tab" role="tab" data-tab="escalations" aria-selected="false">Escalations</button>
+    <button type="button" class="tab" role="tab" data-tab="journey" aria-selected="false">Journey Flows</button>
+    <button type="button" class="tab" role="tab" data-tab="escalation" aria-selected="false">Agent Escalation</button>
   </nav>
 
   <section class="filters" aria-label="Filters">
@@ -30,38 +30,56 @@
       <span>Date range</span>
       <select id="f-range">
         <option value="1">Last 24 hours</option>
-        <option value="7">Last 7 days</option>
-        <option value="30" selected>Last 30 days</option>
-        <option value="90">Last 90 days</option>
+        <option value="3">Last 3 days</option>
+        <option value="7" selected>Last 7 days</option>
+        <option value="10">Last 10 days</option>
         <option value="custom">Custom…</option>
       </select>
     </label>
     <label class="field custom-range" hidden><span>From</span><input type="date" id="f-from"></label>
     <label class="field custom-range" hidden><span>To</span><input type="date" id="f-to"></label>
-    <label class="field"><span>Virtual agent</span><select id="f-bot"><option value="">All virtual agents</option></select></label>
+    <label class="field"><span>AVA</span><select id="f-agent"><option value="">All AVAs</option></select></label>
     <label class="field"><span>Channel</span><select id="f-media"><option value="">All channels</option></select></label>
     <label class="field"><span>Intent</span><select id="f-intent"><option value="">All intents</option></select></label>
-    <label class="field"><span>Intents per session</span>
-      <select id="f-intentcount">
+    <label class="field"><span>Valid response to all intents</span>
+      <select id="f-verdict">
         <option value="">Any</option>
-        <option value="none">None</option>
-        <option value="one">One</option>
-        <option value="multiple">More than one</option>
+        <option value="all_valid">Yes</option>
+        <option value="not_all_valid">No</option>
+        <option value="customer_left">Customer left first</option>
+        <option value="no_request">No request</option>
+        <option value="not_analyzed">Not analyzed yet</option>
       </select>
     </label>
-    <label class="field"><span>Outcome</span>
+    <label class="field"><span>Intent response</span>
+      <select id="f-intentverdict">
+        <option value="">Any</option>
+        <option value="valid">Has a valid one</option>
+        <option value="partial">Has a partly valid one</option>
+        <option value="not_valid">Has one not valid</option>
+      </select>
+    </label>
+    <label class="field"><span>Containment</span>
       <select id="f-containment">
-        <option value="">All outcomes</option>
+        <option value="">Any</option>
         <option value="contained">Contained</option>
-        <option value="escalated">Escalated</option>
+        <option value="not_contained">Not contained</option>
+        <option value="unscored">Not scored yet</option>
       </select>
     </label>
-    <label class="field"><span>Bot exit</span><select id="f-result"><option value="">All exit reasons</option></select></label>
-    <label class="field"><span>Recognition failure</span>
-      <select id="f-failure">
+    <label class="field"><span>Abandoned</span>
+      <select id="f-abandon">
         <option value="">Any</option>
-        <option value="yes">Had a failure</option>
-        <option value="no">No failures</option>
+        <option value="abandoned">Abandoned</option>
+        <option value="not_abandoned">Not abandoned</option>
+        <option value="unscored">Not scored yet</option>
+      </select>
+    </label>
+    <label class="field"><span>Genesys flags</span>
+      <select id="f-issues">
+        <option value="">Any</option>
+        <option value="yes">Has a flag</option>
+        <option value="no">No flags</option>
       </select>
     </label>
     <label class="field"><span>Preview sessions</span>
@@ -75,50 +93,52 @@
   </section>
 
   <div class="banner" id="banner" hidden></div>
+  <div class="banner progress" id="progress" hidden></div>
 
   <main id="main">
   <div id="view-overview">
     <section class="kpis" id="kpis" aria-label="Key metrics"></section>
 
-    <section class="grid two">
+    <section class="grid three">
       <article class="card">
-        <header class="card-head">
-          <h2>Sessions per day</h2>
-          <div class="legend" id="trend-legend"></div>
-        </header>
-        <div class="chart" id="trend"></div>
+        <header class="card-head"><h2>Containment</h2><span class="muted small">Select a row to filter</span></header>
+        <div id="containment" class="bar-list"></div>
       </article>
       <article class="card">
-        <header class="card-head"><h2>Why sessions left the bot</h2></header>
-        <div id="results" class="bar-list"></div>
+        <header class="card-head"><h2>Abandons</h2><span class="muted small">Select a row to filter</span></header>
+        <div id="abandons" class="bar-list"></div>
+      </article>
+      <article class="card">
+        <header class="card-head"><h2>Why sessions were transferred</h2></header>
+        <div id="transfer-reasons" class="bar-list"></div>
       </article>
     </section>
 
     <section class="grid two wide-left">
       <article class="card">
         <header class="card-head">
-          <h2>Intent performance</h2>
+          <h2>Intents</h2>
           <span class="muted small">Select a row to filter</span>
         </header>
         <div class="table-wrap"><table class="data" id="intents"></table></div>
       </article>
       <article class="card">
-        <header class="card-head"><h2>Recognition failures</h2></header>
-        <div id="failures" class="bar-list"></div>
+        <header class="card-head"><h2>How the AVA responded to each intent</h2></header>
+        <div id="verdicts" class="bar-list"></div>
       </article>
     </section>
 
     <section class="card">
       <header class="card-head">
-        <h2>Virtual agents</h2>
+        <h2>AVAs</h2>
         <span class="muted small">Select a row to filter</span>
       </header>
-      <div class="table-wrap"><table class="data" id="bots"></table></div>
+      <div class="table-wrap"><table class="data" id="agents"></table></div>
     </section>
 
     <section class="card" id="sessions-card">
       <header class="card-head">
-        <h2>Sessions <span class="muted" id="session-count"></span></h2>
+        <h2>AVA sessions <span class="muted" id="session-count"></span></h2>
         <div class="card-actions">
           <input type="search" id="f-search" placeholder="Search conversation ID" aria-label="Search conversation ID">
           <button type="button" class="btn" id="export">Export CSV</button>
@@ -131,42 +151,117 @@
     <section class="card definitions">
       <h2>How these numbers are calculated</h2>
       <dl>
-        <dt>Contained</dt><dd>The conversation never reached a queue or an agent after the bot session. When Genesys has no conversation detail for a session, a disconnect inside the bot counts as contained and an exit back to the flow counts as escalated.</dd>
-        <dt>Reached an agent</dt><dd>An agent connected to the conversation that included the bot session.</dd>
-        <dt>Query self-service rate</dt><dd>Customer questions the bot marked as self-served, divided by all questions it handled (Genesys oBotSessionQuerySelfServed / oBotSessionQuery).</dd>
-        <dt>Intent recognized</dt><dd>Sessions where the bot matched at least one intent, from either turn data or Genesys's session totals.</dd>
-        <dt>Intents in a session</dt><dd>A bot that loops, such as Navigator, can match several intents in one session. Every one is kept: the session counts under each intent it matched, the Intent filter finds a session by any of them, and the session list shows them in the order they were recognized (A → B). Matches counts every recognition, including the same intent matched twice in one session. The order and repeats come from turn-level data, which Genesys keeps for about 10 days; intents that only Genesys's session totals record (such as knowledge matches, or anything older than the turn data) are listed after the ordered ones.</dd>
-        <dt>Preview sessions</dt><dd>Sessions started from preview (test) mode in Architect. They have no real conversation, so they are left out by default; the Preview sessions filter can include them or show only them.</dd>
-        <dt>Bot response time</dt><dd>For each customer turn, the time from when Genesys captured the customer's input until the bot had its reply ready. The greeting is not counted. Median and longest are taken across every turn in the selection, so they apply per org, per virtual agent or per session depending on the filters. Genesys appears to keep turn-level data for only about the last 10 days, and sessions where the customer never replied have no turn to time, so these figures cover only the sessions that have turn data.</dd>
-        <dt>Recognition failure</dt><dd>Sessions with at least one no-match or no-input event.</dd>
+        <dt>AVA session</dt><dd>A bot session in which an Agentic Virtual Agent took at least one turn (Genesys records the AVA’s name and version on those turns). Only the AVA’s own turns are used. Classic bot steps in the same flow, such as an intent menu or a slot prompt before the AVA starts, are left out, as are classic bot metrics like containment and recognition failures.</dd>
+        <dt>Intents detected</dt><dd>Genesys does not record an intent on AVA turns, so Claude reads each session’s AVA transcript (card numbers, PINs and similar values masked) and lists every distinct thing the customer wanted to get done or find out, in the order raised. Greetings, thanks and answers to the AVA’s own questions (name, date of birth, yes or no) are not intents. Asking for a person is. Claude is shown the intent names already used for that AVA so the same request gets the same name.</dd>
+        <dt>Valid response</dt><dd id="verdict-defs"></dd>
+        <dt>Valid response to all intents</dt><dd><b>Yes</b> when every intent the AVA had a chance to answer got a valid response. <b>No</b> when at least one was partly valid or not valid. Intents cut off because the customer left are not held against the AVA; a session where that happened to every intent shows “Customer left first”. Sessions where the customer never said anything show “No request”.</dd>
+        <dt>Contained</dt><dd>A session with at least one intent is contained when it meets one of three rules and none of the exclusions.
+          <ul>
+            <li><b>Full task resolution</b>: no transfer to a person, and every intent was supported and resolved.</li>
+            <li><b>Graceful partial containment</b>: transferred only because an intent was unsupported by design, after the AVA resolved at least one supported intent.</li>
+            <li><b>Self-service deflection</b>: the session ended normally with no transfer, and every intent the AVA got to handle was resolved.</li>
+          </ul>
+          Never contained: a supported intent the AVA had a chance to answer but did not resolve, or a transfer caused by an error or by more than two misunderstandings.
+          <br>Where each input comes from. <b>Genesys</b>: transferred (the conversation reached a queue or an agent after the AVA started, or the AVA ended with a transfer) and ended normally (no transfer, no error ending). <b>Claude</b>, inferred from the transcript: whether each intent is supported and resolved, the transfer reason (unsupported intent, customer frustration, system error, customer preference) and the number of misunderstandings. Sessions analyzed before these fields existed show no containment until Claude re-reads them.</dd>
+        <dt>Abandoned</dt><dd>A session with at least one intent is abandoned when it meets one of three rules, and neither exclusion applies.
+          <ul>
+            <li><b>Frustration abandon</b>: no transfer, the customer hung up or went quiet, and the AVA misunderstood them at least twice.</li>
+            <li><b>Dead-end abandon</b>: no transfer, the customer hung up or went quiet, an intent was unsupported, and the AVA’s last message was a fallback.</li>
+            <li><b>Premature drop-off</b>: no transfer, the customer hung up after at least three turns, and no intent was resolved.</li>
+          </ul>
+          Never abandoned: a transfer to a person (an escalation), or a session where the last supported intent was resolved before the customer left (a deflection).
+          <br>Where each input comes from. <b>Genesys</b>: how the session ended (the AVA’s end reason and how the customer’s side disconnected: hung up or left, timed out, natural completion; Genesys has no signal for a channel switch) and the number of customer turns. <b>Claude</b>, inferred from the transcript: what the AVA’s last message was doing (an error result Genesys records overrides it), whether the customer went silent after a failure, plus the containment inputs above.</dd>
+        <dt>Genesys flags</dt><dd>What Genesys itself recorded on the AVA’s turns, with no AI judgment: an error result, a guardrail that blocked a reply, a tool call that did not succeed, or customer input that got no reply. A flag doesn’t always mean a bad response (a guardrail can rightly block a request), and a response can be wrong without any flag, which is why the verdicts come from reading the transcript.</dd>
+        <dt>AVA reply time</dt><dd>For each customer turn, the time from when Genesys captured the customer’s input until the AVA had its reply ready.</dd>
+        <dt>Data window</dt><dd>Everything here comes from Genesys’s turn-level data, which it appears to keep for only about the last 10 days, so ranges further back come up empty.</dd>
       </dl>
     </section>
   </div>
 
-  <div id="view-escalations" hidden>
-    <div class="banner esc-note" id="esc-note" hidden></div>
-    <section class="grid two">
-      <article class="card esc-reasons">
-        <header class="card-head">
-          <h2>Why sessions were escalated</h2>
-          <span class="muted small">Select a reason to filter</span>
-        </header>
-        <p class="muted small" id="esc-summary"></p>
-        <div id="esc-categories" class="bar-list"></div>
-      </article>
-      <article class="card definitions">
-        <h2>What each reason means</h2>
-        <dl id="esc-definitions"></dl>
-        <p class="muted small">Each escalated session’s bot transcript (with card numbers and PINs masked) is read by Claude, which picks the reason and writes a short explanation. When Genesys no longer has the transcript, its own AI summary of the conversation is used instead. Results are saved on the server, so a session is only analyzed once.</p>
-      </article>
-    </section>
+  <div id="view-journey" hidden>
     <section class="card">
       <header class="card-head">
-        <h2>Escalated sessions <span class="muted" id="esc-count"></span></h2>
-        <div class="card-actions"><button type="button" class="btn" id="esc-export">Export CSV</button></div>
+        <h2>Intent journeys <span class="muted" id="journey-count"></span></h2>
+        <div class="card-actions">
+          <label class="field inline"><span>Steps</span>
+            <select id="j-steps"><option value="3">3</option><option value="4" selected>4</option><option value="5">5</option><option value="6">6</option></select>
+          </label>
+          <label class="field inline"><span>Intents per step</span>
+            <select id="j-per"><option value="5">5</option><option value="8" selected>8</option><option value="12">12</option><option value="20">20</option></select>
+          </label>
+        </div>
       </header>
-      <div class="table-wrap"><table class="data sessions" id="escalations"></table></div>
-      <button type="button" class="btn btn-ghost show-more" id="esc-more" hidden></button>
+      <div class="journey-intents" id="journey-intents"></div>
+      <div class="journey-focus" id="journey-focus" hidden></div>
+      <p class="muted small journey-hint">Each band’s width is the number of sessions that took that step, and each node shows its share of the sessions in the graph. Hover a node or line to trace its sessions through the graph; click it to focus on just those sessions.</p>
+      <div class="journey-wrap" id="journey"></div>
+    </section>
+    <section class="card">
+      <header class="card-head"><h2>Most common journeys</h2><span class="muted small">Select a row to focus the graph on it</span></header>
+      <div class="table-wrap"><table class="data" id="journey-paths"></table></div>
+    </section>
+    <section class="card definitions">
+      <h2>How the journeys are built</h2>
+      <dl>
+        <dt>Path</dt><dd>Every session where Claude found at least one intent runs from Start through its intents, in the order the customer raised them, to its outcome: valid response to all intents, not valid to all, or customer left first. The same intent at a different step is a separate node, so the graph shows what customers ask for first, second and so on.</dd>
+        <dt>Percentages</dt><dd>Share of all sessions with intents under the current filters. When the graph is focused, the tooltips also give the share of the focused sessions.</dd>
+        <dt>Folding</dt><dd>Intents beyond the chosen number of steps fold into “More intents”. At each step, intents outside the most common ones fold into “Other intents”; raise “Intents per step” to see them. The six most common intents keep the same color everywhere; the rest are gray.</dd>
+      </dl>
+    </section>
+  </div>
+
+  <div id="view-escalation" hidden>
+    <div class="seg" id="esc-mode" role="group" aria-label="Sessions to show">
+      <button type="button" data-mode="handoff" aria-pressed="true">Intents before the hand-off</button>
+      <button type="button" data-mode="reasons" aria-pressed="false">Escalation reasons</button>
+    </div>
+    <section class="kpis" id="esc-kpis" aria-label="Escalation metrics"></section>
+    <section class="card">
+      <header class="card-head">
+        <h2 id="esc-title">Escalation journeys <span class="muted" id="esc-count"></span></h2>
+        <div class="card-actions">
+          <label class="field inline"><span>Steps</span>
+            <select id="esc-steps"><option value="3">3</option><option value="4" selected>4</option><option value="5">5</option><option value="6">6</option></select>
+          </label>
+          <label class="field inline"><span>Intents per step</span>
+            <select id="esc-per"><option value="5">5</option><option value="8" selected>8</option><option value="12">12</option><option value="20">20</option></select>
+          </label>
+        </div>
+      </header>
+      <div class="journey-intents" id="esc-intents"></div>
+      <div class="journey-focus" id="esc-focus" hidden></div>
+      <p class="muted small journey-hint" id="esc-hint"></p>
+      <div class="journey-wrap" id="escalation"></div>
+    </section>
+    <section class="card">
+      <header class="card-head"><h2 id="esc-table-title">Intents driving escalations</h2><span class="muted small" id="esc-table-hint"></span></header>
+      <div class="table-wrap"><table class="data" id="esc-intent-table"></table></div>
+    </section>
+    <section class="card" id="esc-why" hidden>
+      <header class="card-head"><h2 id="esc-why-title">Why customers asked for a person</h2><span class="muted small">Claude’s note on the AVA’s answer to this intent in each session, worst answers first</span></header>
+      <div id="esc-why-body"></div>
+    </section>
+    <section class="card">
+      <header class="card-head"><h2 id="esc-paths-title">Most common escalation journeys</h2><span class="muted small">Select a row to focus the graph on it</span></header>
+      <div class="table-wrap"><table class="data" id="esc-paths"></table></div>
+    </section>
+    <section class="card definitions">
+      <h2>How escalations are measured</h2>
+      <dl data-esc-mode="handoff">
+        <dt>Escalated</dt><dd>Genesys shows the conversation going to a queue or an agent after the AVA started, whoever asked for it. When Genesys conversation detail is missing, Claude’s transfer reason stands in.</dd>
+        <dt>Intents before the hand-off</dt><dd>If the customer asked to speak to a person (Claude found an intent such as “Speak to a person” or “Request a live agent”), the intents raised before that first request. Otherwise, every intent in the session, because the AVA handed off on its own. Customers who asked for a person first have no intents before the hand-off, so they are counted in the tiles but not drawn in the graph.</dd>
+        <dt>Who asked for the person</dt><dd>“Customer” when Claude found a request for a person or Genesys recorded that the customer asked for an agent; otherwise the AVA handed off without a request.</dd>
+        <dt>AVA answer before the hand-off</dt><dd>Claude’s verdict on the intent raised right before the hand-off: not valid, partial, valid (escalated anyway), or escalated before the AVA could answer.</dd>
+        <dt>Escalation rate</dt><dd>Of all sessions in which Claude found the intent, the share that escalated with the intent raised before the hand-off. A high rate with many sessions is the best place to improve the AVA.</dd>
+        <dt>Not valid or partial, not resolved</dt><dd>For the escalated sessions with the intent: how often the AVA’s answer to it was not valid or only partial, and how often Claude judged it not resolved. Select a row to read Claude’s note on each answer.</dd>
+      </dl>
+      <dl data-esc-mode="reasons" hidden>
+        <dt>Escalated</dt><dd>Genesys shows the conversation going to a queue or an agent after the AVA started. “Reached an agent” means an agent picked it up; “Queue only” means it was queued but no agent interaction is recorded (for example, the customer left while waiting). When Genesys conversation detail is missing, Claude’s transfer reason stands in.</dd>
+        <dt>Escalation reason</dt><dd>Claude’s reading of why the hand-off happened: an intent the AVA doesn’t support, customer frustration, a system error, or the customer simply asking for a person. “Reason not identified” is a hand-off Claude saw no reason for in the AVA transcript.</dd>
+        <dt>Escalation rate</dt><dd>Of all sessions in which Claude found the intent, the share that escalated. A high rate with many sessions is the best place to improve the AVA.</dd>
+        <dt>Last intent before hand-off</dt><dd>How often the intent was the last thing the customer raised before going to a person. A request to speak to a person is skipped here, so the intent behind it shows instead.</dd>
+        <dt>Resolved by the AVA</dt><dd>In the escalated sessions, how often Claude judged the AVA resolved this intent before the hand-off. Low means the AVA couldn’t help with it; high means the customer went on to something else.</dd>
+      </dl>
     </section>
   </div>
   </main>
@@ -187,6 +282,7 @@
   </aside>
 
   <script src="metrics.js"></script>
+  <script src="journey.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

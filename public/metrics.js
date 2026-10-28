@@ -1,272 +1,682 @@
-// Pure reporting logic over bot-session rows. Loaded as a classic script in the browser
-// (window.AvaMetrics) and with require() in tests.
+// Metric calculations for the AVA dashboard (v2). Pure functions over AVA session rows, so the
+// same code runs in the browser and in Node tests.
 (function (root) {
   'use strict';
 
-  const RESULT_LABELS = {
-    ExitRequestedByBot: 'Bot handed back to the flow',
-    ExitRequestedByUser: 'Customer asked to leave the bot',
-    ExitAgentRequestedByUser: 'Customer asked for an agent',
-    ExitRecognitionFailure: 'Exited after recognition failures',
-    ExitError: 'Exited on an error',
-    DisconnectRequestedByUser: 'Customer disconnected',
-    DisconnectRequestedByBot: 'Bot ended the conversation',
-    DisconnectSessionExpired: 'Session expired',
-    DisconnectError: 'Disconnected on an error',
+  // ---------- Per session ----------
+  const intents = (s) => s.analysis?.intents || [];
+  // Intents the AVA had a chance to answer (the customer didn't leave first).
+  const judged = (s) => intents(s).filter((i) => i.verdict !== 'no_chance');
+
+  // Did the AVA give a valid response to every intent in the session?
+  //   all_valid / not_all_valid: Claude listed the intents and judged each one
+  //   customer_left: every intent was cut off before the AVA could answer
+  //   no_request: the customer never asked for anything
+  //   pending / not_analyzed: no analysis yet
+  function sessionVerdict(s) {
+    if (s.customerTurns === 0) return 'no_request';
+    if (!s.analysis) return s.pending ? 'pending' : 'not_analyzed';
+    if (!intents(s).length) return 'no_request';
+    const j = judged(s);
+    if (!j.length) return 'customer_left';
+    return j.every((i) => i.verdict === 'valid') ? 'all_valid' : 'not_all_valid';
+  }
+
+  const SESSION_VERDICT_LABEL = {
+    all_valid: 'Yes',
+    not_all_valid: 'No',
+    customer_left: 'Customer left first',
+    no_request: 'No request',
+    pending: 'Being analyzed',
+    not_analyzed: 'Not analyzed',
   };
 
-  const FAILURE_LABELS = {
-    NoMatchCollection: 'No match (didn’t understand)',
-    NoInputCollection: 'No input (silence / no reply)',
-    NoMatchConfirmation: 'No match on confirmation',
-    NoInputConfirmation: 'No input on confirmation',
-  };
+  const issueCount = (s) => Object.values(s.issues || {}).reduce((a, b) => a + b, 0);
 
-  function humanize(code) {
-    return code ? code.replace(/([a-z])([A-Z])/g, '$1 $2') : 'Unknown';
+  function median(values) {
+    if (!values.length) return null;
+    const v = values.slice().sort((a, b) => a - b);
+    const mid = v.length >> 1;
+    return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
   }
-  const resultLabel = (code) => (code ? RESULT_LABELS[code] || humanize(code) : 'Still active / not reported');
-  const failureLabel = (code) => FAILURE_LABELS[code] || humanize(code);
+  const ratio = (a, b) => (b ? a / b : null);
 
-  // Contained = the conversation never reached a queue or agent after the bot.
-  // When conversation details are missing we fall back to the bot's own outcome:
-  // a disconnect inside the bot counts as contained, an exit back to the flow as escalated.
-  function containment(s) {
-    if (s.escalation === 'agent' || s.escalation === 'queue') return 'escalated';
-    if (s.escalation === 'none') return 'contained';
-    if (s.outcome === 'disconnect') return 'contained';
-    if (s.outcome === 'exit') return 'escalated';
-    return 'unknown';
-  }
-
-  // Every intent recognized in a session: the turn-by-turn path first (in order, with repeats),
-  // then any intent Genesys's session aggregates add that the turns don't name. The two sources
-  // don't always agree (the aggregates can miss an intent from a looping bot's earlier pass, and
-  // only they record knowledge matches), so the union is the complete list.
-  function intentPath(s) {
-    const path = s.intentPath || [];
-    return path.concat(s.intents.filter((i) => !path.includes(i)));
-  }
-
-  // Distinct intents in a session, including the final intent.
-  function sessionIntents(s) {
-    return [...new Set(intentPath(s).concat(s.finalIntent ? [s.finalIntent] : []))];
-  }
-
-  function intentCountBucket(s) {
-    const n = intentPath(s).length;
-    return n === 0 ? 'none' : n === 1 ? 'one' : 'multiple';
-  }
-
+  // ---------- Filters ----------
   function applyFilters(sessions, f = {}) {
-    const bots = f.botIds && f.botIds.length ? new Set(f.botIds) : null;
     const q = (f.search || '').trim().toLowerCase();
     return sessions.filter((s) => {
-      if (f.preview === 'exclude' && s.preview) return false;
-      if (f.preview === 'only' && !s.preview) return false;
-      if (bots && !bots.has(s.botId)) return false;
+      if (f.preview === 'only' ? !s.preview : f.preview !== 'include' && s.preview) return false;
+      if (f.agent && s.agentName !== f.agent) return false;
       if (f.media && s.media !== f.media) return false;
-      if (f.intent && !sessionIntents(s).includes(f.intent)) return false;
-      if (f.containment && containment(s) !== f.containment) return false;
-      if (f.intentCount && intentCountBucket(s) !== f.intentCount) return false;
-      if (f.botResult && (s.botResult || '') !== f.botResult) return false;
-      if (f.recognitionFailure === 'yes' && !s.recognitionFailures) return false;
-      if (f.recognitionFailure === 'no' && s.recognitionFailures) return false;
-      if (q && !(`${s.conversationId || ''} ${s.id}`.toLowerCase().includes(q))) return false;
+      if (f.intent && !intents(s).some((i) => i.name === f.intent)) return false;
+      if (f.verdict && sessionVerdict(s) !== f.verdict) return false;
+      if (f.intentVerdict && !intents(s).some((i) => i.verdict === f.intentVerdict && (!f.intent || i.name === f.intent))) return false;
+      if (f.containment && (f.containment === 'unscored' ? containment(s).status !== null : containment(s).status !== f.containment)) return false;
+      if (f.abandon && (f.abandon === 'unscored' ? abandonment(s).status !== null : abandonment(s).status !== f.abandon)) return false;
+      if (f.issues === 'yes' && !issueCount(s)) return false;
+      if (f.issues === 'no' && issueCount(s)) return false;
+      if (q && !`${s.conversationId || ''} ${s.id}`.toLowerCase().includes(q)) return false;
       return true;
     });
   }
 
-  const ratio = (n, d) => (d ? n / d : null);
-  const median = (values) => {
-    const v = values.filter((x) => x != null).sort((a, b) => a - b);
-    if (!v.length) return null;
-    const mid = Math.floor(v.length / 2);
-    return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
-  };
-  const mean = (values) => {
-    const v = values.filter((x) => x != null);
-    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
-  };
-
-  // Bot response times are per customer turn; org- and bot-level figures pool every
-  // turn rather than averaging per-session values, so a long session weighs more.
-  function responseStats(sessions) {
-    const times = [];
-    let timedSessions = 0;
+  function options(sessions) {
+    const agents = new Set();
+    const media = new Set();
+    const names = new Set();
     for (const s of sessions) {
-      if (s.responseTimesMs?.length) timedSessions++;
-      for (const ms of s.responseTimesMs || []) times.push(ms);
+      if (s.agentName) agents.add(s.agentName);
+      if (s.media) media.add(s.media);
+      for (const i of intents(s)) names.add(i.name);
     }
-    return { responseTurns: times.length, timedSessions, medianResponseMs: median(times), maxResponseMs: times.length ? times.reduce((a, b) => (b > a ? b : a)) : null };
+    const sort = (set) => [...set].sort((a, b) => a.localeCompare(b));
+    return { agents: sort(agents), media: sort(media), intents: sort(names) };
   }
 
-  function sessionResponse(s) {
-    return responseStats([s]);
+  // ---------- Summaries ----------
+  function tallyIntents(sessions) {
+    const t = { valid: 0, partial: 0, not_valid: 0, no_chance: 0 };
+    for (const s of sessions) for (const i of intents(s)) if (i.verdict in t) t[i.verdict]++;
+    return t;
   }
 
   function summarize(sessions) {
-    let contained = 0, escalated = 0, unknown = 0, reachedAgent = 0, inferred = 0;
-    let queries = 0, served = 0, withFailure = 0, withIntent = 0, multiIntent = 0, intentMatches = 0;
+    const analyzed = sessions.filter((s) => s.analysis);
+    const verdicts = {};
     for (const s of sessions) {
-      const c = containment(s);
-      if (c === 'contained') contained++;
-      else if (c === 'escalated') escalated++;
-      else unknown++;
-      if (s.escalation === 'agent') reachedAgent++;
-      if (s.escalation == null) inferred++;
-      queries += s.queries || 0;
-      served += s.selfServedQueries || 0;
-      if (s.recognitionFailures) withFailure++;
-      const n = intentPath(s).length;
-      if (n) withIntent++;
-      intentMatches += n;
-      if (n > 1) multiIntent++;
+      const v = sessionVerdict(s);
+      verdicts[v] = (verdicts[v] || 0) + 1;
     }
-    const known = contained + escalated;
+    const scored = (verdicts.all_valid || 0) + (verdicts.not_all_valid || 0);
+    const withIntents = analyzed.filter((s) => intents(s).length);
+    const t = tallyIntents(sessions);
+    const judgedIntents = t.valid + t.partial + t.not_valid;
+    const responseTimes = sessions.flatMap((s) => s.responseTimesMs || []);
+    let toolCalls = 0, toolFailures = 0, guardrails = 0, errors = 0;
+    for (const s of sessions) {
+      toolCalls += s.toolCalls || 0;
+      toolFailures += s.issues?.tool_failed || 0;
+      guardrails += s.issues?.guardrail || 0;
+      errors += (s.issues?.error || 0) + (s.issues?.no_reply || 0);
+    }
     return {
       sessions: sessions.length,
-      contained,
-      escalated,
-      unknown,
-      inferred,
-      reachedAgent,
-      containmentRate: ratio(contained, known),
-      escalationRate: ratio(escalated, known),
-      agentRate: ratio(reachedAgent, sessions.length),
-      selfServiceRate: ratio(served, queries),
-      queries,
-      intentRate: ratio(withIntent, sessions.length),
-      withIntent,
-      multiIntent,
-      intentsPerSession: ratio(intentMatches, withIntent),
-      recognitionFailureRate: ratio(withFailure, sessions.length),
-      avgTurns: mean(sessions.map((s) => s.turns)),
-      // Median, because messaging sessions can stay open for days and swamp an average.
-      medianDurationMs: median(sessions.map((s) => s.durationMs)),
-      ...responseStats(sessions),
+      analyzed: analyzed.length,
+      verdicts,
+      scored,
+      allValid: verdicts.all_valid || 0,
+      allValidRate: ratio(verdicts.all_valid || 0, scored),
+      intents: t.valid + t.partial + t.not_valid + t.no_chance,
+      intentsPerSession: ratio(withIntents.reduce((a, s) => a + intents(s).length, 0), withIntents.length),
+      multiIntent: withIntents.filter((s) => intents(s).length > 1).length,
+      intentVerdicts: t,
+      judgedIntents,
+      validIntentRate: ratio(t.valid, judgedIntents),
+      toolCalls,
+      toolFailures,
+      toolSuccessRate: toolCalls ? 1 - toolFailures / toolCalls : null,
+      guardrails,
+      errors,
+      agentRequested: sessions.filter((s) => s.agentRequested).length,
+      medianResponseMs: median(responseTimes),
+      responseTurns: responseTimes.length,
     };
   }
 
-  function localDay(iso) {
-    const d = new Date(iso);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-
-  // Daily contained / escalated counts, with empty days filled across [startIso, endIso).
-  function byDay(sessions, startIso, endIso) {
-    const days = new Map();
-    const cursor = new Date(startIso);
-    cursor.setHours(0, 0, 0, 0);
-    const end = new Date(endIso);
-    while (cursor < end) {
-      days.set(localDay(cursor), { day: localDay(cursor), contained: 0, escalated: 0, unknown: 0 });
-      cursor.setDate(cursor.getDate() + 1);
-    }
+  // One row per intent name: how often it came up and how the AVA handled it.
+  function intentTable(sessions) {
+    const rows = new Map();
     for (const s of sessions) {
-      if (!s.start) continue;
-      const key = localDay(s.start);
-      if (!days.has(key)) days.set(key, { day: key, contained: 0, escalated: 0, unknown: 0 });
-      days.get(key)[containment(s)]++;
-    }
-    return [...days.values()].sort((a, b) => a.day.localeCompare(b.day));
-  }
-
-  function countBy(sessions, keyFn, labelFn) {
-    const counts = new Map();
-    for (const s of sessions) {
-      for (const key of [].concat(keyFn(s))) {
-        if (key === undefined) continue;
-        counts.set(key, (counts.get(key) || 0) + 1);
+      const seen = new Set();
+      for (const i of intents(s)) {
+        if (!rows.has(i.name)) rows.set(i.name, { intent: i.name, sessions: 0, valid: 0, partial: 0, not_valid: 0, no_chance: 0 });
+        const r = rows.get(i.name);
+        if (!seen.has(i.name)) r.sessions++;
+        seen.add(i.name);
+        if (i.verdict in r) r[i.verdict]++;
       }
     }
-    return [...counts.entries()]
-      .map(([key, count]) => ({ key, label: labelFn ? labelFn(key) : key, count }))
-      .sort((a, b) => b.count - a.count);
+    return [...rows.values()]
+      .map((r) => ({ ...r, judged: r.valid + r.partial + r.not_valid, validRate: ratio(r.valid, r.valid + r.partial + r.not_valid) }))
+      .sort((a, b) => b.sessions - a.sessions || a.intent.localeCompare(b.intent));
   }
 
-  const byResult = (sessions) => countBy(sessions, (s) => s.botResult || null, resultLabel);
-  const byFailureReason = (sessions) => countBy(sessions, (s) => s.recognitionFailureReasons, failureLabel);
-
-  function groupTable(sessions, keysFn, describe) {
+  // One row per AVA (all versions together).
+  function agentTable(sessions) {
     const groups = new Map();
     for (const s of sessions) {
-      for (const key of keysFn(s)) {
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(s);
+      const k = s.agentName || '(unknown)';
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(s);
+    }
+    return [...groups].map(([agentName, list]) => {
+      const sum = summarize(list);
+      const versions = new Set(list.flatMap((s) => (s.agents || []).filter((a) => a.name === agentName).map((a) => a.version)));
+      return {
+        agentName,
+        versions: [...versions].sort((a, b) => Number(a) - Number(b) || a.localeCompare(b)),
+        media: [...new Set(list.map((s) => s.media).filter(Boolean))].join(', '),
+        sessions: list.length,
+        analyzed: sum.analyzed,
+        intentsPerSession: sum.intentsPerSession,
+        allValidRate: sum.allValidRate,
+        validIntentRate: sum.validIntentRate,
+        toolCalls: sum.toolCalls,
+        toolFailures: sum.toolFailures,
+        guardrails: sum.guardrails,
+        medianResponseMs: sum.medianResponseMs,
+      };
+    }).sort((a, b) => b.sessions - a.sessions);
+  }
+
+  // ---------- Containment ----------
+  // Chad's containment rules (2026-10-28). Inputs per session:
+  //   IsSupportedIntent / IntentResolved: Claude's judgment per intent (transcript)
+  //   TransferTriggered: Genesys, the conversation reached a queue or agent after the AVA, or the
+  //     AVA ended with a transfer; Claude's transfer reason only when Genesys has no detail
+  //   TransferReason: Claude (unsupported_intent, user_frustration, system_error, customer_preference)
+  //   FallbackLoopCount: Claude's count of times the AVA failed to understand the customer
+  //   SessionEndedNormally: Genesys, no transfer and no error ending
+  // Returns { status: 'contained' | 'not_contained' | null, rule, reason }; null when the session
+  // has no intents or hasn't been analyzed with these fields yet.
+  const CONTAINMENT_RULES = {
+    full_resolution: 'Full task resolution',
+    partial: 'Graceful partial containment',
+    deflection: 'Self-service deflection',
+  };
+  const NOT_CONTAINED = {
+    supported_unresolved: 'Supported intent not resolved',
+    breakdown: 'Transfer after an error or repeated misunderstanding',
+    transferred: 'Transferred to a person',
+    unsupported_unresolved: 'Unsupported intent not handed off',
+    customer_left: 'Customer left before it was resolved',
+  };
+
+  function containment(s) {
+    const a = s.analysis;
+    const list = intents(s);
+    if (!a || a.outdated || a.refused || !list.length || list.some((i) => typeof i.resolved !== 'boolean')) return { status: null };
+    const transferred = s.transferred ?? (a.transferReason ? a.transferReason !== 'none' : null);
+    const reason = a.transferReason && a.transferReason !== 'none' ? a.transferReason : null;
+    const loops = a.misunderstandings || 0;
+    const no = (key) => ({ status: 'not_contained', rule: key, reason: NOT_CONTAINED[key] });
+    const yes = (key) => ({ status: 'contained', rule: key, reason: CONTAINMENT_RULES[key] });
+    // Exclusions apply whatever else happened.
+    if (list.some((i) => i.supported && !i.resolved && i.verdict !== 'no_chance')) return no('supported_unresolved');
+    if (transferred && (reason === 'system_error' || loops > 2)) return no('breakdown');
+    // 1. Full task resolution: no transfer, every intent supported and resolved.
+    if (!transferred && list.every((i) => i.supported && i.resolved)) return yes('full_resolution');
+    // 2. Graceful partial containment: handed off only because of an unsupported intent, after resolving a supported one.
+    if (transferred && reason === 'unsupported_intent' && list.some((i) => i.supported && i.resolved)) return yes('partial');
+    // 3. Self-service deflection: ended normally with no transfer and every intent it handled resolved.
+    const handled = list.filter((i) => i.verdict !== 'no_chance');
+    if (s.endedNormally && !transferred && handled.length && handled.every((i) => i.resolved)) return yes('deflection');
+    if (transferred) return no('transferred');
+    if (list.some((i) => !i.supported && !i.resolved && i.verdict !== 'no_chance')) return no('unsupported_unresolved');
+    return no('customer_left');
+  }
+
+  // Plain-language reasons a session was not contained: the exclusion or outcome that decided
+  // it, then why each of the three containment rules did not apply.
+  const TRANSFER_REASON_TEXT = {
+    unsupported_intent: 'the customer asked for something the AVA is not designed to handle',
+    user_frustration: 'the customer became frustrated with the AVA',
+    system_error: 'an error or failure forced the hand-off',
+    customer_preference: 'the customer asked for a person',
+  };
+
+  function containmentExplanation(s) {
+    const c = containment(s);
+    if (c.status !== 'not_contained') return null;
+    const a = s.analysis;
+    const list = intents(s);
+    const transferred = s.transferred ?? (a.transferReason ? a.transferReason !== 'none' : null);
+    const reason = a.transferReason && a.transferReason !== 'none' ? a.transferReason : null;
+    const loops = a.misunderstandings || 0;
+    const q = (i) => `“${i.name}”`;
+    const names = (xs) => (xs.length === 1 ? q(xs[0]) : `${xs.slice(0, -1).map(q).join(', ')} and ${q(xs[xs.length - 1])}`);
+    const unresolvedSupported = list.filter((i) => i.supported && !i.resolved && i.verdict !== 'no_chance');
+    const unsupported = list.filter((i) => !i.supported);
+    const resolvedSupported = list.filter((i) => i.supported && i.resolved);
+    const handoff = transferred
+      ? `The conversation was handed to a person${s.handoff === 'agent' ? ' and reached an agent' : s.handoff === 'queue' ? ' (sent to a queue)' : ''}${reason ? ` because ${TRANSFER_REASON_TEXT[reason]}` : ''}.`
+      : null;
+
+    let summary;
+    if (c.rule === 'supported_unresolved') {
+      summary = `The AVA did not resolve ${names(unresolvedSupported)}, which ${unresolvedSupported.length > 1 ? 'are' : 'is'} within what it is designed to handle. A supported intent left unresolved always rules out containment${transferred ? ', and a hand-off to a person does not count as resolving it' : ''}.`;
+    } else if (c.rule === 'breakdown') {
+      summary = `The hand-off happened because the AVA broke down, not at a clean boundary: ${reason === 'system_error' ? 'an error or failure forced the transfer' : `the AVA misunderstood the customer ${loops} times`}. Such a transfer always rules out containment.`;
+    } else if (c.rule === 'transferred') {
+      summary = `${handoff} It was not a hand-off of an unsupported intent after the AVA had resolved a supported one, so it does not count as graceful partial containment.`;
+    } else if (c.rule === 'unsupported_unresolved') {
+      summary = `${names(unsupported.filter((i) => !i.resolved))} ${unsupported.length > 1 ? 'were' : 'was'} outside what the AVA is designed to handle and went unresolved, and the customer was not handed to a person for ${unsupported.length > 1 ? 'them' : 'it'}.`;
+    } else {
+      summary = 'The customer left before the AVA resolved their request, so the session did not end in a self-service resolution.';
+    }
+
+    const rules = [];
+    // 1. Full task resolution
+    const r1 = [];
+    if (transferred) r1.push('the session was transferred to a person');
+    if (unsupported.length) r1.push(`${names(unsupported)} ${unsupported.length > 1 ? 'are' : 'is'} not supported`);
+    const unresolved = list.filter((i) => !i.resolved);
+    if (unresolved.length) r1.push(`${names(unresolved)} ${unresolved.length > 1 ? 'were' : 'was'} not resolved`);
+    rules.push({ rule: CONTAINMENT_RULES.full_resolution, why: r1.length ? `Not met: ${r1.join('; ')}.` : 'Not met.' });
+    // 2. Graceful partial containment
+    const r2 = [];
+    if (!transferred) r2.push('there was no transfer to a person');
+    else if (reason !== 'unsupported_intent') r2.push(reason ? `the transfer happened because ${TRANSFER_REASON_TEXT[reason]}, not because of an unsupported intent` : 'the transfer was not caused by an unsupported intent');
+    if (!resolvedSupported.length) r2.push('no supported intent was resolved first');
+    rules.push({ rule: CONTAINMENT_RULES.partial, why: r2.length ? `Not met: ${r2.join('; ')}.` : 'Met, but an exclusion applied.' });
+    // 3. Self-service deflection
+    const r3 = [];
+    if (transferred) r3.push('the session was transferred');
+    else if (!s.endedNormally) r3.push('the session did not end normally (it ended with an error or Genesys has no record of how it ended)');
+    const unresolvedHandled = list.filter((i) => i.verdict !== 'no_chance' && !i.resolved);
+    if (unresolvedHandled.length) r3.push(`${names(unresolvedHandled)} ${unresolvedHandled.length > 1 ? 'were' : 'was'} handled but not resolved`);
+    rules.push({ rule: CONTAINMENT_RULES.deflection, why: r3.length ? `Not met: ${r3.join('; ')}.` : 'Met, but an exclusion applied.' });
+
+    const facts = [];
+    if (handoff && c.rule !== 'transferred') facts.push(handoff);
+    if (loops) facts.push(`Claude counted ${loops} time${loops > 1 ? 's' : ''} the AVA misunderstood the customer.`);
+    return { title: c.reason, summary, facts, rules };
+  }
+
+  function containmentSummary(sessions) {
+    const counts = {};
+    let contained = 0;
+    let scored = 0;
+    for (const s of sessions) {
+      const c = containment(s);
+      if (!c.status) continue;
+      scored++;
+      if (c.status === 'contained') contained++;
+      counts[c.rule] = (counts[c.rule] || 0) + 1;
+    }
+    const rows = [
+      ...Object.entries(CONTAINMENT_RULES).map(([key, label]) => ({ key, label, contained: true, count: counts[key] || 0 })),
+      ...Object.entries(NOT_CONTAINED).map(([key, label]) => ({ key, label, contained: false, count: counts[key] || 0 })),
+    ];
+    return { contained, scored, rate: ratio(contained, scored), rows };
+  }
+
+  // ---------- Abandons ----------
+  // Chad's abandon rules (2026-10-28), on top of the containment inputs:
+  //   SessionExitType: Genesys (AVA end reason, the customer's disconnect type, a final no-input)
+  //   LastBotState: Claude, except an error result on the last AVA turn is error_message (Genesys)
+  //   UserUtteranceCount: Genesys, customer turns in the AVA
+  //   MidSessionSilence: Claude (shown, not used by the rules)
+  const ABANDON_RULES = {
+    frustration: 'Frustration abandon',
+    dead_end: 'Dead-end abandon',
+    premature: 'Premature drop-off',
+  };
+  const NOT_ABANDONED = {
+    escalation: 'Transferred to a person (escalation)',
+    deflection: 'Resolved, then left (deflection)',
+    other: 'Other ending',
+  };
+  const EXIT_LABEL = { natural_completion: 'Natural completion', user_hangup: 'Customer hung up or left', timeout: 'Timed out', transfer: 'Transferred', channel_switch: 'Switched channel' };
+
+  function abandonment(s) {
+    const a = s.analysis;
+    const list = intents(s);
+    if (!a || a.outdated || a.refused || !list.length || !a.lastBotState) return { status: null };
+    const transferred = s.transferred ?? (a.transferReason ? a.transferReason !== 'none' : null);
+    const exit = s.exitType;
+    const lastState = s.lastResult === 'Error' ? 'error_message' : a.lastBotState;
+    const loops = a.misunderstandings || 0;
+    const yes = (key) => ({ status: 'abandoned', rule: key, reason: ABANDON_RULES[key] });
+    const no = (key) => ({ status: 'not_abandoned', rule: key, reason: NOT_ABANDONED[key] });
+    // Exclusions: a transfer is an escalation; a resolved final supported intent followed by the
+    // customer leaving is a deflection.
+    if (transferred) return no('escalation');
+    const supported = list.filter((i) => i.supported);
+    const lastSupported = supported[supported.length - 1];
+    if (lastSupported?.resolved && (exit === 'user_hangup' || exit === 'natural_completion' || exit === 'timeout')) return no('deflection');
+    const leftEarly = exit === 'user_hangup' || exit === 'timeout';
+    if (leftEarly && loops >= 2) return yes('frustration');
+    if (leftEarly && list.some((i) => !i.supported) && lastState === 'fallback_prompt') return yes('dead_end');
+    if (exit === 'user_hangup' && (s.customerTurns || 0) >= 3 && list.every((i) => !i.resolved)) return yes('premature');
+    return no('other');
+  }
+
+  function abandonmentSummary(sessions) {
+    const counts = {};
+    let abandoned = 0;
+    let scored = 0;
+    for (const s of sessions) {
+      const c = abandonment(s);
+      if (!c.status) continue;
+      scored++;
+      if (c.status === 'abandoned') abandoned++;
+      counts[c.rule] = (counts[c.rule] || 0) + 1;
+    }
+    const rows = [
+      ...Object.entries(ABANDON_RULES).map(([key, label]) => ({ key, label, abandoned: true, count: counts[key] || 0 })),
+      ...Object.entries(NOT_ABANDONED).map(([key, label]) => ({ key, label, abandoned: false, count: counts[key] || 0 })),
+    ];
+    return { abandoned, scored, rate: ratio(abandoned, scored), rows };
+  }
+
+  // ---------- Journey flows ----------
+  // Each session with intents becomes a path: Start → intent 1 → intent 2 → … → outcome.
+  // Nodes are keyed by step and intent, so the same intent at step 1 and step 2 are separate
+  // nodes. Steps past `maxSteps` fold into one "More intents" node; past the `maxPerStep`
+  // most common intents at a step, the rest fold into "Other intents".
+  const OUTCOMES = [
+    { key: 'all_valid', label: 'Valid to all intents' },
+    { key: 'not_all_valid', label: 'Not valid to all intents' },
+    { key: 'customer_left', label: 'Customer left first' },
+  ];
+  const OTHER = 'Other intents';
+  const SEQ = 'seq:';
+  const sequenceFocus = (names) => SEQ + names.join('\u0001');
+  const MORE = 'More intents';
+
+  const intentNames = (s) => intents(s).map((i) => i.name);
+  // `names` picks which intents make up each path, and `outcome` and `outcomes` swap the end column, e.g. the escalation reason on Agent Escalation.
+  function journeyGraph(sessions, { maxSteps = 4, maxPerStep = 8, focus = [], outcome = sessionVerdict, outcomes = OUTCOMES, names: namesOf = intentNames } = {}) {
+    const raw = sessions.map((s) => ({ id: s.id, names: namesOf(s), outcome: outcome(s) })).filter((r) => r.names.length);
+    // Most common intents per step, counted before folding so the cut is stable.
+    const keep = [];
+    for (let step = 1; step <= maxSteps; step++) {
+      const counts = new Map();
+      for (const r of raw) if (r.names[step - 1]) counts.set(r.names[step - 1], (counts.get(r.names[step - 1]) || 0) + 1);
+      keep[step] = new Set([...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, maxPerStep).map(([n]) => n));
+    }
+    const nodeId = (step, label) => `${step}|${label}`;
+    let paths = raw.map((r) => {
+      const nodes = [nodeId(0, 'Start')];
+      r.names.slice(0, maxSteps).forEach((n, i) => nodes.push(nodeId(i + 1, keep[i + 1].has(n) ? n : OTHER)));
+      if (r.names.length > maxSteps) nodes.push(nodeId(maxSteps + 1, MORE));
+      nodes.push(nodeId('end', r.outcome));
+      return { sessionId: r.id, intents: r.names, outcome: r.outcome, nodes };
+    });
+    const allTotal = paths.length;
+    // Focus keeps only the sessions that pass through every focused node (or link "a>b"),
+    // or whose intents are exactly a focused sequence.
+    for (const f of focus) {
+      if (f.startsWith(SEQ)) {
+        paths = paths.filter((p) => sequenceFocus(p.intents) === f);
+        continue;
+      }
+      const [a, b] = f.split('>');
+      paths = paths.filter((p) => {
+        const i = p.nodes.indexOf(a);
+        return i >= 0 && (b === undefined || p.nodes[i + 1] === b);
+      });
+    }
+    const nodes = new Map();
+    const links = new Map();
+    for (const p of paths) {
+      p.nodes.forEach((id, i) => {
+        if (!nodes.has(id)) {
+          const [step, label] = id.split(/\|(.*)/s);
+          const kind = step === '0' ? 'start' : step === 'end' ? 'outcome' : label === OTHER ? 'other' : label === MORE ? 'more' : 'intent';
+          nodes.set(id, { id, step: step === 'end' ? Infinity : Number(step), label: kind === 'outcome' ? outcomes.find((o) => o.key === label)?.label || label : label, key: label, kind, count: 0 });
+        }
+        nodes.get(id).count++;
+        if (i) {
+          const key = `${p.nodes[i - 1]}>${id}`;
+          if (!links.has(key)) links.set(key, { id: key, source: p.nodes[i - 1], target: id, count: 0 });
+          links.get(key).count++;
+        }
+      });
+    }
+    return { total: paths.length, allTotal, paths, nodes: [...nodes.values()], links: [...links.values()], maxSteps, outcomeOrder: outcomes.map((o) => o.key) };
+  }
+
+  // Link counts for a subset of a graph's paths, for highlighting the flow through a node or link.
+  function linkCounts(paths) {
+    const out = new Map();
+    for (const p of paths) for (let i = 1; i < p.nodes.length; i++) {
+      const key = `${p.nodes[i - 1]}>${p.nodes[i]}`;
+      out.set(key, (out.get(key) || 0) + 1);
+    }
+    return out;
+  }
+
+  // Sessions that include any (or all) of the given intents; no intents keeps every session.
+  function withIntents(sessions, names = [], match = 'any', namesOf = intentNames) {
+    if (!names.length) return sessions;
+    return sessions.filter((s) => {
+      const have = new Set(namesOf(s));
+      return match === 'all' ? names.every((n) => have.has(n)) : names.some((n) => have.has(n));
+    });
+  }
+
+  // The most common full intent sequences, for the table under the graph.
+  function topPaths(sessions, limit = 15, namesOf = intentNames) {
+    const rows = new Map();
+    for (const s of sessions) {
+      const names = namesOf(s);
+      if (!names.length) continue;
+      const key = names.join(' → ');
+      if (!rows.has(key)) rows.set(key, { path: names, sessions: 0, allValid: 0, scored: 0 });
+      const r = rows.get(key);
+      r.sessions++;
+      const v = sessionVerdict(s);
+      if (v === 'all_valid' || v === 'not_all_valid') r.scored++;
+      if (v === 'all_valid') r.allValid++;
+    }
+    return [...rows.values()].map((r) => ({ ...r, allValidRate: ratio(r.allValid, r.scored) })).sort((a, b) => b.sessions - a.sessions).slice(0, limit);
+  }
+
+  // ---------- Agent escalation ----------
+  // A session escalated when Genesys shows a hand-off to a queue or agent after the AVA; without
+  // conversation detail, Claude's transfer reason stands in.
+  function isEscalated(s) {
+    const r = s.analysis?.transferReason;
+    return Boolean(s.transferred ?? (r ? r !== 'none' : false));
+  }
+  const ESCALATION_OUTCOMES = [
+    { key: 'unsupported_intent', label: 'Unsupported intent' },
+    { key: 'user_frustration', label: 'Customer frustration' },
+    { key: 'system_error', label: 'System error' },
+    { key: 'customer_preference', label: 'Customer asked for a person' },
+    { key: 'unknown', label: 'Reason not identified' },
+  ];
+  const escalationLabel = (key) => ESCALATION_OUTCOMES.find((o) => o.key === key)?.label || key;
+  function escalationOutcome(s) {
+    const r = s.analysis?.transferReason;
+    return r && r !== 'none' && ESCALATION_OUTCOMES.some((o) => o.key === r) ? r : 'unknown';
+  }
+  // Asking for a person is how a hand-off happens, not why, so it is skipped when picking the
+  // intent the customer raised last before the hand-off (unless it is the only one).
+  function lastIntentBeforeEscalation(s) {
+    const names = intents(s).map((i) => i.name);
+    const real = names.filter((n) => !isPersonRequest(n));
+    return (real.length ? real : names).at(-1) || null;
+  }
+  const topKey = (counts) => [...counts].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))[0]?.[0] ?? null;
+
+  // Per intent: how many escalated sessions include it, how often sessions with it escalate, how
+  // often it was the last thing raised before the hand-off, and why those sessions escalated.
+  function escalationIntentTable(sessions) {
+    const rows = new Map();
+    const asked = sessions.filter((s) => intents(s).length);
+    const escalatedTotal = asked.filter(isEscalated).length;
+    for (const s of asked) {
+      const esc = isEscalated(s);
+      const last = esc ? lastIntentBeforeEscalation(s) : null;
+      const seen = new Set();
+      for (const i of intents(s)) {
+        if (seen.has(i.name)) continue;
+        seen.add(i.name);
+        if (!rows.has(i.name)) rows.set(i.name, { intent: i.name, sessions: 0, escalated: 0, lastBefore: 0, reasons: new Map(), handled: 0, resolved: 0 });
+        const r = rows.get(i.name);
+        r.sessions++;
+        if (!esc) continue;
+        r.escalated++;
+        if (last === i.name) r.lastBefore++;
+        const o = escalationOutcome(s);
+        r.reasons.set(o, (r.reasons.get(o) || 0) + 1);
+        const same = intents(s).filter((x) => x.name === i.name && x.verdict !== 'no_chance');
+        if (same.length) {
+          r.handled++;
+          if (same.every((x) => x.resolved === true || (x.resolved == null && x.verdict === 'valid'))) r.resolved++;
+        }
       }
     }
-    return [...groups.entries()]
-      .map(([key, rows]) => ({ key, ...describe(key, rows), ...summarize(rows) }))
-      .sort((a, b) => b.sessions - a.sessions);
+    return [...rows.values()].filter((r) => r.escalated).map((r) => {
+      const known = [...r.reasons].filter(([k]) => k !== 'unknown');
+      const topReason = topKey(new Map(known.length ? known : r.reasons));
+      return {
+        intent: r.intent, sessions: r.sessions, escalated: r.escalated,
+        shareOfEscalated: ratio(r.escalated, escalatedTotal),
+        escalationRate: ratio(r.escalated, r.sessions),
+        lastBefore: r.lastBefore,
+        resolvedRate: ratio(r.resolved, r.handled),
+        topReason, topReasonLabel: topReason ? escalationLabel(topReason) : null,
+        reasons: Object.fromEntries(r.reasons),
+      };
+    }).sort((a, b) => b.escalated - a.escalated || b.lastBefore - a.lastBefore || a.intent.localeCompare(b.intent));
   }
 
-  function intentTable(sessions) {
-    const total = sessions.length;
-    return groupTable(
-      sessions,
-      sessionIntents,
-      (key, rows) => ({
-        intent: key,
-        share: ratio(rows.length, total),
-        asFinal: rows.filter((r) => r.finalIntent === key).length,
-        matches: rows.reduce((a, r) => a + intentPath(r).filter((i) => i === key).length, 0),
-      })
-    );
-  }
-
-  function botTable(sessions) {
-    return groupTable(
-      sessions,
-      (s) => [s.botId],
-      (key, rows) => ({ botId: key, botName: rows[0].botName, botType: rows[0].botType, media: [...new Set(rows.map((r) => r.media))].join(', ') })
-    );
-  }
-
-  function options(sessions) {
-    const bots = new Map();
-    const intents = new Set();
-    const results = new Set();
-    const media = new Set();
-    for (const s of sessions) {
-      bots.set(s.botId, s.botName);
-      sessionIntents(s).forEach((i) => intents.add(i));
-      if (s.botResult) results.add(s.botResult);
-      if (s.media) media.add(s.media);
+  function escalationSummary(sessions) {
+    const asked = sessions.filter((s) => intents(s).length);
+    const escalated = sessions.filter(isEscalated);
+    const escWithIntents = asked.filter(isEscalated);
+    const lasts = new Map();
+    const reasons = new Map();
+    for (const s of escWithIntents) {
+      const l = lastIntentBeforeEscalation(s);
+      if (l) lasts.set(l, (lasts.get(l) || 0) + 1);
+      const o = escalationOutcome(s);
+      if (o !== 'unknown') reasons.set(o, (reasons.get(o) || 0) + 1);
     }
-    const byName = (a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' });
+    const topLast = topKey(lasts);
+    const topReason = topKey(reasons);
     return {
-      bots: [...bots.entries()].map(([id, name]) => ({ id, name: name || id })).sort((a, b) => byName(a.name, b.name)),
-      intents: [...intents].sort(byName),
-      results: [...results].sort().map((code) => ({ code, label: resultLabel(code) })),
-      media: [...media].sort(),
+      sessions: sessions.length,
+      escalated: escalated.length,
+      rate: ratio(escalated.length, sessions.length),
+      reachedAgent: escalated.filter((s) => s.handoff === 'agent').length,
+      queueOnly: escalated.filter((s) => s.handoff === 'queue').length,
+      withIntents: escWithIntents.length,
+      topLastIntent: topLast, topLastCount: topLast ? lasts.get(topLast) : 0,
+      topReason, topReasonLabel: topReason ? escalationLabel(topReason) : null, topReasonCount: topReason ? reasons.get(topReason) : 0,
+      reasonsKnown: [...reasons.values()].reduce((a, b) => a + b, 0),
     };
   }
 
-  // The dashboard's side of "Check against Genesys": the same totals Genesys reports in
-  // its own aggregates, rebuilt from the session rows the dashboard uses.
-  function verificationTotals(sessions) {
-    const sum = (f) => sessions.reduce((a, s) => a + (f(s) || 0), 0);
-    const conversations = (pred) => new Set(sessions.filter(pred).map((s) => s.conversationId).filter(Boolean)).size;
-    const intentSessions = {};
-    for (const s of sessions) for (const i of s.intents) intentSessions[i] = (intentSessions[i] || 0) + 1;
+  // ---------- Intents before the hand-off ----------
+  // Claude names intents freely, so a request for a person is recognized from the intent's name;
+  // Genesys also flags a session when the customer asked for an agent (AgentRequestedByUser).
+  const PERSON_REQUEST = /\b(speak|talk|chat|connect|transfer|escalat\w*|request|want|need|get)\b.*\b(person|agent|human|representative|rep|someone|somebody|operator|staff|specialist|advisor|associate)\b|\b(live|human|real) (agent|person|representative|chat)\b|\brepresentative\b|\boperator\b/i;
+  const isPersonRequest = (name) => PERSON_REQUEST.test(name || '');
+  const askedForPerson = (s) => intents(s).some((i) => isPersonRequest(i.name)) || Boolean(s.agentRequested);
+  // For an escalated session, the intents the customer raised before the hand-off: those before
+  // their first request for a person, or all of them when the AVA handed off on its own.
+  function intentsBeforeHandoff(s) {
+    if (!isEscalated(s)) return [];
+    const all = intents(s);
+    const at = all.findIndex((i) => isPersonRequest(i.name));
+    return (at < 0 ? all : all.slice(0, at)).filter((i) => !isPersonRequest(i.name));
+  }
+  const namesBeforeHandoff = (s) => intentsBeforeHandoff(s).map((i) => i.name);
+  // How the AVA answered the intent raised right before the hand-off.
+  const HANDOFF_OUTCOMES = [
+    { key: 'not_valid', label: 'AVA’s answer was not valid' },
+    { key: 'partial', label: 'AVA’s answer was partial' },
+    { key: 'valid', label: 'AVA answered, still escalated' },
+    { key: 'no_chance', label: 'Escalated before the AVA answered' },
+  ];
+  function handoffOutcome(s) {
+    const before = intentsBeforeHandoff(s);
+    return before.length ? before.at(-1).verdict : null;
+  }
+
+  // Per intent raised before a hand-off: how often, how often it came right before it, who asked
+  // for the person, how the AVA answered it, and Claude's notes on those answers.
+  function handoffIntentTable(sessions) {
+    const rows = new Map();
+    const escalated = sessions.filter(isEscalated).length;
+    for (const s of sessions) {
+      const before = intentsBeforeHandoff(s);
+      const beforeNames = new Set(before.map((i) => i.name));
+      const seen = new Set();
+      for (const i of intents(s)) {
+        if (isPersonRequest(i.name) || seen.has(i.name)) continue;
+        seen.add(i.name);
+        if (!rows.has(i.name)) rows.set(i.name, { intent: i.name, sessions: 0, before: 0, rightBefore: 0, customerAsked: 0, verdicts: { valid: 0, partial: 0, not_valid: 0, no_chance: 0 }, unresolved: 0, handled: 0, reasons: new Map(), notes: [] });
+        const r = rows.get(i.name);
+        r.sessions++;
+        if (!beforeNames.has(i.name)) continue;
+        r.before++;
+        if (before.at(-1).name === i.name) r.rightBefore++;
+        if (askedForPerson(s)) r.customerAsked++;
+        const o = escalationOutcome(s);
+        if (o !== 'unknown') r.reasons.set(o, (r.reasons.get(o) || 0) + 1);
+        const same = before.filter((x) => x.name === i.name);
+        const worst = ['not_valid', 'partial', 'valid', 'no_chance'].find((v) => same.some((x) => x.verdict === v)) || 'no_chance';
+        r.verdicts[worst]++;
+        if (worst !== 'no_chance') {
+          r.handled++;
+          if (same.some((x) => x.resolved === false)) r.unresolved++;
+        }
+        const x = same.find((y) => y.verdict === worst);
+        r.notes.push({ sessionId: s.id, start: s.start, verdict: worst, customerAsked: x?.customerAsked || '', why: x?.why || '', askedForPerson: askedForPerson(s), handoff: s.handoff || null, transferReason: s.analysis?.transferReason || null });
+      }
+    }
+    const order = { not_valid: 0, partial: 1, valid: 2, no_chance: 3 };
+    return [...rows.values()].filter((r) => r.before).map((r) => {
+      const judgedCount = r.verdicts.valid + r.verdicts.partial + r.verdicts.not_valid;
+      const topReason = topKey(r.reasons);
+      return {
+        intent: r.intent, sessions: r.sessions, before: r.before, rightBefore: r.rightBefore,
+        shareOfEscalations: ratio(r.before, escalated),
+        escalationRate: ratio(r.before, r.sessions),
+        customerAskedRate: ratio(r.customerAsked, r.before),
+        verdicts: r.verdicts,
+        notValidRate: ratio(r.verdicts.not_valid + r.verdicts.partial, judgedCount),
+        unresolvedRate: ratio(r.unresolved, r.handled),
+        reasons: Object.fromEntries(r.reasons),
+        topReason, topReasonLabel: topReason ? escalationLabel(topReason) : null,
+        notes: r.notes.sort((a, b) => order[a.verdict] - order[b.verdict] || String(b.start || '').localeCompare(String(a.start || ''))),
+      };
+    }).sort((a, b) => b.before - a.before || b.rightBefore - a.rightBefore || a.intent.localeCompare(b.intent));
+  }
+
+  function handoffSummary(sessions) {
+    const escalated = sessions.filter(isEscalated);
+    const analyzed = escalated.filter((s) => s.analysis && !s.analysis.outdated);
+    const lasts = new Map();
+    const outcomes = new Map();
+    let noIntentsBefore = 0;
+    for (const s of analyzed) {
+      const b = intentsBeforeHandoff(s);
+      if (!b.length) { noIntentsBefore++; continue; }
+      lasts.set(b.at(-1).name, (lasts.get(b.at(-1).name) || 0) + 1);
+      outcomes.set(b.at(-1).verdict, (outcomes.get(b.at(-1).verdict) || 0) + 1);
+    }
+    const topLast = topKey(lasts);
+    const failed = (outcomes.get('not_valid') || 0) + (outcomes.get('partial') || 0);
+    const judgedCount = failed + (outcomes.get('valid') || 0);
+    const asked = analyzed.filter(askedForPerson).length;
     return {
-      totals: {
-        sessions: sessions.length,
-        turns: sum((s) => s.turns),
-        exits: sessions.filter((s) => s.outcome === 'exit').length,
-        disconnects: sessions.filter((s) => s.outcome === 'disconnect').length,
-        recognitionFailures: sum((s) => s.recognitionFailures),
-        queries: sum((s) => s.queries),
-        selfServedQueries: sum((s) => s.selfServedQueries),
-        conversations: conversations(() => true),
-        conversationsWithAgent: conversations((s) => s.escalation === 'agent'),
-      },
-      intentSessions,
+      sessions: sessions.length,
+      escalated: escalated.length,
+      rate: ratio(escalated.length, sessions.length),
+      analyzed: analyzed.length,
+      customerAsked: asked,
+      avaInitiated: analyzed.length - asked,
+      noIntentsBefore,
+      withIntentsBefore: analyzed.length - noIntentsBefore,
+      topLastIntent: topLast, topLastCount: topLast ? lasts.get(topLast) : 0,
+      failed, judged: judgedCount, failedRate: ratio(failed, judgedCount),
+      reachedAgent: escalated.filter((s) => s.handoff === 'agent').length,
     };
   }
 
-  const api = { intentPath, intentCountBucket, verificationTotals, containment, applyFilters, summarize, byDay, byResult, byFailureReason, intentTable, botTable, options, resultLabel, failureLabel, localDay, median, responseStats, sessionResponse };
-  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  function localDay(d) {
+    const x = new Date(d);
+    return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+  }
+
+  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, containmentExplanation, abandonment, abandonmentSummary, ABANDON_RULES, NOT_ABANDONED, EXIT_LABEL, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, isEscalated, ESCALATION_OUTCOMES, escalationOutcome, escalationLabel, lastIntentBeforeEscalation, escalationIntentTable, escalationSummary, isPersonRequest, askedForPerson, intentsBeforeHandoff, namesBeforeHandoff, HANDOFF_OUTCOMES, handoffOutcome, handoffIntentTable, handoffSummary, localDay };
+  if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);
