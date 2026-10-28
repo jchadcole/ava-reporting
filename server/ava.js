@@ -31,7 +31,7 @@ const CACHE_FILE = process.env.AVA_CACHE_FILE || path.join(__dirname, '..', 'dat
 const MAX_TRANSCRIPT_CHARS = 40_000;
 const MAX_KNOWN_INTENTS = 60;
 // Bump when the verdicts or instructions change, so saved analyses are redone.
-const PROMPT_VERSION = 3; // 2 added supported, resolved, transfer reason, misunderstandings; 3 last AVA state, silence
+const PROMPT_VERSION = 4; // 2 added supported, resolved, transfer reason, misunderstandings; 3 last AVA state, silence; 4 out-of-scope replies are valid
 
 // Third-party bots report ids like "agent_operator?instance_name=..."; show the part before the query.
 function displayBotName(id, name) {
@@ -239,9 +239,9 @@ function avaTranscript(turns) {
 
 // ---------- Claude ----------
 const VERDICTS = [
-  { key: 'valid', label: 'Valid', description: 'The AVA understood the request and gave a relevant, complete response: it answered, completed the task, correctly declined something it must not do, or transferred because the customer asked for a person or a hand-off was the right step.' },
+  { key: 'valid', label: 'Valid', description: 'The AVA understood the request and gave a relevant, complete response: it answered, completed the task, correctly declined something it must not do, recognized the request was outside its scope and clearly told the customer so (whether or not a guardrail fired), or transferred because the customer asked for a person or a hand-off was the right step.' },
   { key: 'partial', label: 'Partly valid', description: 'The AVA addressed the request only in part, gave a vague answer, or the customer had to repeat or rephrase before it got there.' },
-  { key: 'not_valid', label: 'Not valid', description: 'The AVA misunderstood, gave a wrong, irrelevant or made-up answer, hit an error or failed tool and could not finish, gave no reply, or transferred because it could not handle the request.' },
+  { key: 'not_valid', label: 'Not valid', description: 'The AVA misunderstood, gave a wrong, irrelevant or made-up answer, hit an error or failed tool and could not finish, gave no reply, or could not handle a request within its scope and transferred or gave up. A request outside its scope that it clearly told the customer it can\'t help with is valid, not this.' },
   { key: 'no_chance', label: 'Customer left first', description: 'The session ended before the AVA could respond to the request, for example the customer hung up mid-request.' },
 ];
 
@@ -295,7 +295,7 @@ For the session, give the transfer reason if the customer was handed to a person
 ${TRANSFER_REASONS.filter((r) => r.description).map((r) => `- ${r.key}: ${r.description}`).join('\n')}
 Use none if there was no hand-off. Also count the times the AVA failed to understand the customer, say what the AVA's last message was doing, and whether the customer went silent right after the AVA failed or fell back.
 
-Lines in [brackets] are signals Genesys recorded for that turn (tool calls and their status, guardrail blocks, errors, the customer saying nothing). A guardrail block is valid when the AVA was right to refuse. Base every judgment only on the transcript; you cannot see tool results beyond what the AVA said. Card numbers, PINs and similar values are masked with •.`;
+Lines in [brackets] are signals Genesys recorded for that turn (tool calls and their status, guardrail blocks, errors, the customer saying nothing). A guardrail block is valid when the AVA was right to refuse. Likewise, when the AVA recognizes a request is outside its scope and properly tells the customer (for example, that it can't help with that here, ideally saying where they can get help), the verdict is valid even if no guardrail fired; the intent is still unsupported and unresolved. Base every judgment only on the transcript; you cannot see tool results beyond what the AVA said. Card numbers, PINs and similar values are masked with •.`;
 
 function analysisInput(session, transcript, knownIntents) {
   const parts = [
