@@ -16,6 +16,10 @@ const { maskText, summarizeTurn, turnResponseMs } = require('./detail');
 const { claudeEnabled, askJson, isFatalClaudeError } = require('./claude');
 
 const BOT_AGG = '/api/v2/analytics/bots/aggregates/query';
+const DETAILS = '/api/v2/analytics/conversations/details/query';
+const DETAILS_WINDOW_MS = 30 * 86_400_000; // details queries are limited to ~31 days per call
+const DETAILS_PAGE_SIZE = 100;
+const MAX_DETAIL_CONVERSATIONS = Number(process.env.MAX_DETAIL_CONVERSATIONS) || 5000;
 const TURN_PAGE_SIZE = 250;
 const MAX_TURN_PAGES_PER_BOT = Number(process.env.MAX_TURN_PAGES_PER_BOT) || 40;
 const EXCLUDED_BOT_TYPES = new Set((process.env.EXCLUDE_BOT_TYPES ?? 'VOICESURVEY').split(',').map((t) => t.trim()).filter(Boolean));
@@ -27,7 +31,7 @@ const CACHE_FILE = process.env.AVA_CACHE_FILE || path.join(__dirname, '..', 'dat
 const MAX_TRANSCRIPT_CHARS = 40_000;
 const MAX_KNOWN_INTENTS = 60;
 // Bump when the verdicts or instructions change, so saved analyses are redone.
-const PROMPT_VERSION = 1;
+const PROMPT_VERSION = 2; // 2 added supported, resolved, transfer reason and misunderstandings
 
 // Third-party bots report ids like "agent_operator?instance_name=..."; show the part before the query.
 function displayBotName(id, name) {
@@ -113,6 +117,70 @@ async function fetchAvaTurns(request, botId, interval) {
   return { bySession, truncated };
 }
 
+// ---------- Hand-offs to a person (Genesys conversation detail) ----------
+// When the conversation reached a queue, and an agent, so a session can be marked as
+// transferred if that happened after its AVA started.
+function summarizeHandoff(c) {
+  let queueAt = null;
+  let agentAt = null;
+  let queueName = null;
+  for (const p of c.participants || []) {
+    if (p.purpose !== 'acd' && p.purpose !== 'agent') continue;
+    for (const sess of p.sessions || []) {
+      for (const seg of sess.segments || []) {
+        if (p.purpose === 'acd' && (!queueAt || seg.segmentStart < queueAt)) {
+          queueAt = seg.segmentStart;
+          queueName = p.participantName || queueName;
+        }
+        if (p.purpose === 'agent' && seg.segmentType === 'interact' && (!agentAt || seg.segmentStart < agentAt)) agentAt = seg.segmentStart;
+      }
+    }
+  }
+  return { queueAt, agentAt, queueName };
+}
+
+async function fetchHandoffs(request, startMs, endMs) {
+  const out = new Map();
+  let truncated = false;
+  for (let ws = startMs; ws < endMs && !truncated; ws += DETAILS_WINDOW_MS) {
+    const interval = `${new Date(ws).toISOString()}/${new Date(Math.min(endMs, ws + DETAILS_WINDOW_MS)).toISOString()}`;
+    for (let page = 1; ; page++) {
+      const res = await request(DETAILS, {
+        interval,
+        order: 'desc',
+        orderBy: 'conversationStart',
+        paging: { pageSize: DETAILS_PAGE_SIZE, pageNumber: page },
+        segmentFilters: [{ type: 'and', predicates: [{ dimension: 'purpose', value: 'botflow' }] }],
+      });
+      for (const c of res.conversations || []) out.set(c.conversationId, summarizeHandoff(c));
+      if (out.size >= MAX_DETAIL_CONVERSATIONS) {
+        truncated = true;
+        break;
+      }
+      if (!res.conversations || res.conversations.length < DETAILS_PAGE_SIZE) break;
+    }
+  }
+  return { handoffs: out, truncated };
+}
+
+// Genesys's view of how the AVA session ended. `transferred` is true when the conversation
+// reached a queue or agent after the AVA started, or the AVA itself ended with a transfer;
+// null when Genesys has no conversation detail for it. `endedNormally` means no transfer and
+// no error or recognition-failure ending.
+function applyHandoff(s, h) {
+  const endTransfer = /AgentRequestedByUser|Transfer/i.test(s.endReason || '');
+  const after = (t) => t && (!s.start || t >= s.start);
+  if (h) {
+    s.handoff = after(h.agentAt) ? 'agent' : after(h.queueAt) ? 'queue' : endTransfer ? 'requested' : 'none';
+    s.queueName = s.handoff === 'agent' || s.handoff === 'queue' ? h.queueName : null;
+  } else {
+    s.handoff = endTransfer ? 'requested' : null;
+  }
+  s.transferred = s.handoff == null ? null : s.handoff !== 'none';
+  s.endedNormally = s.transferred === false && !/Error|RecognitionFailure/i.test(s.endReason || '');
+  return s;
+}
+
 // ---------- Transcript for Claude ----------
 const RESULT_NOTE = {
   NoInputCollection: 'customer said nothing',
@@ -149,6 +217,14 @@ const VERDICTS = [
   { key: 'no_chance', label: 'Customer left first', description: 'The session ended before the AVA could respond to the request, for example the customer hung up mid-request.' },
 ];
 
+const TRANSFER_REASONS = [
+  { key: 'none', label: 'Not transferred' },
+  { key: 'unsupported_intent', label: 'Unsupported intent', description: 'The customer asked for something the AVA is not designed to handle, so it handed off by design.' },
+  { key: 'user_frustration', label: 'Customer frustration', description: 'The customer became frustrated with the AVA (repeating themselves, complaining, demanding a person after failed attempts).' },
+  { key: 'system_error', label: 'System error', description: 'An error, failed tool, timeout or guardrail breakdown forced the hand-off.' },
+  { key: 'customer_preference', label: 'Customer preference', description: 'The customer asked for a person without the AVA having failed them.' },
+];
+
 const SCHEMA = {
   type: 'object',
   properties: {
@@ -162,13 +238,17 @@ const SCHEMA = {
           customerAsked: { type: 'string', description: 'What the customer asked for, paraphrased in one short sentence without personal details.' },
           verdict: { type: 'string', enum: VERDICTS.map((v) => v.key) },
           why: { type: 'string', description: 'One sentence on why the response got this verdict, specific to the conversation.' },
+          supported: { type: 'boolean', description: 'True if the intent is within what this AVA is designed to handle.' },
+          resolved: { type: 'boolean', description: 'True if the AVA completed the task or correctly answered the question itself, without a person.' },
         },
-        required: ['name', 'customerAsked', 'verdict', 'why'],
+        required: ['name', 'customerAsked', 'verdict', 'why', 'supported', 'resolved'],
         additionalProperties: false,
       },
     },
+    transferReason: { type: 'string', enum: TRANSFER_REASONS.map((r) => r.key), description: 'Why the customer was handed to a person, or none if they were not.' },
+    misunderstandings: { type: 'integer', description: 'How many times the AVA failed to understand the customer (asked them to repeat, answered the wrong thing, or fell back to a generic reply).' },
   },
-  required: ['intents'],
+  required: ['intents', 'transferReason', 'misunderstandings'],
   additionalProperties: false,
 };
 
@@ -179,6 +259,12 @@ An intent is something the customer wanted to get done or find out (a task, ques
 For each intent choose one verdict:
 ${VERDICTS.map((v) => `- ${v.key}: ${v.description}`).join('\n')}
 
+Also judge, for each intent, whether it is supported (within what this AVA is designed to handle: it has the knowledge or tools for it, or it is clearly the AVA's purpose; an AVA saying it cannot help with something, or handing off because it's outside its scope, means unsupported) and whether it was resolved (the AVA itself completed the task or correctly answered; a hand-off to a person is not resolved).
+
+For the session, give the transfer reason if the customer was handed to a person (you are told whether Genesys shows a hand-off):
+${TRANSFER_REASONS.filter((r) => r.description).map((r) => `- ${r.key}: ${r.description}`).join('\n')}
+Use none if there was no hand-off. Also count the times the AVA failed to understand the customer.
+
 Lines in [brackets] are signals Genesys recorded for that turn (tool calls and their status, guardrail blocks, errors, the customer saying nothing). A guardrail block is valid when the AVA was right to refuse. Base every judgment only on the transcript; you cannot see tool results beyond what the AVA said. Card numbers, PINs and similar values are masked with •.`;
 
 function analysisInput(session, transcript, knownIntents) {
@@ -186,6 +272,8 @@ function analysisInput(session, transcript, knownIntents) {
     `AVA: ${session.agentName || 'unknown'} (in bot flow ${session.botName})`,
     `Channel: ${session.media || 'unknown'}`,
   ];
+  const handoff = { agent: `the conversation was transferred to an agent${session.queueName ? ` from the ${session.queueName} queue` : ''}`, queue: `the conversation was sent to ${session.queueName ? `the ${session.queueName} queue` : 'a queue'}`, requested: 'the AVA ended its session to transfer the customer to a person', none: 'the conversation was not transferred to a person' }[session.handoff];
+  parts.push(`After the AVA: ${handoff || 'Genesys has no record of whether the conversation was transferred'}.`);
   if (knownIntents.length) parts.push(`Intent names already used for this AVA (reuse one when it fits):\n${knownIntents.join('\n')}`);
   parts.push(`AVA transcript:\n${transcript}`);
   return parts.join('\n\n');
@@ -214,11 +302,13 @@ function saveStore() {
 }
 
 const storeKey = (orgKey, sessionId) => `${orgKey}:${sessionId}`;
-// A saved analysis stays good while the prompt is unchanged and no turns were added since.
+// A saved analysis is shown while no turns were added since. One from an older prompt is
+// still shown, but queued to be redone so it gains the newer fields.
 function savedAnalysis(orgKey, s) {
   const a = loadStore()[storeKey(orgKey, s.id)];
-  return a && a.promptVersion === PROMPT_VERSION && a.turns === s.turns ? a : null;
+  return a && a.turns === s.turns ? a : null;
 }
+const isCurrent = (a) => a?.promptVersion === PROMPT_VERSION;
 
 // Intent names already given to this AVA's sessions, most used first, so names stay consistent.
 function knownIntentNames(agentName) {
@@ -243,6 +333,8 @@ async function analyzeOne({ orgKey, session, turns }) {
   loadStore()[storeKey(orgKey, session.id)] = {
     agentName: session.agentName,
     intents: refused ? [] : data.intents.filter((i) => i.name?.trim() && VERDICTS.some((v) => v.key === i.verdict)),
+    transferReason: refused ? null : TRANSFER_REASONS.some((r) => r.key === data.transferReason) ? data.transferReason : null,
+    misunderstandings: refused ? null : Number.isInteger(data.misunderstandings) ? data.misunderstandings : null,
     refused,
     model,
     turns: session.turns,
@@ -283,7 +375,7 @@ function analysisEnabled() {
 // Queue every session in the build that has a customer request and no current analysis.
 function queueAnalyses(orgKey, build) {
   if (!analysisEnabled() || status.error) return;
-  const waiting = build.sessions.filter((s) => s.customerTurns > 0 && !savedAnalysis(orgKey, s)).slice(0, MAX_ANALYSES);
+  const waiting = build.sessions.filter((s) => s.customerTurns > 0 && !isCurrent(savedAnalysis(orgKey, s))).slice(0, MAX_ANALYSES);
   for (const s of waiting) {
     const key = storeKey(orgKey, s.id);
     if (!queue.has(key)) queue.set(key, { orgKey, session: s, turns: build.turns.get(s.id) });
@@ -300,10 +392,14 @@ async function buildAvaTurns(client, startIso, endIso) {
   if (!(startMs < endMs)) throw Object.assign(new Error('start must be before end'), { status: 400 });
   const interval = `${new Date(startMs).toISOString()}/${new Date(endMs).toISOString()}`;
 
-  const [names, previews] = await Promise.all([
+  const [names, previews, details] = await Promise.all([
     request(BOT_AGG, { interval, groupBy: ['botId', 'botName', 'botFlowType'], metrics: ['nBotSessions'] }),
     // Sessions run from Architect's preview (test) mode; the browser hides them by default.
     request(BOT_AGG, { interval, groupBy: ['botSessionId', 'previewMode'], metrics: ['nBotSessions'] }),
+    fetchHandoffs(request, startMs, endMs).catch((err) => {
+      console.error(`Conversation detail unavailable: ${err.message}`);
+      return { handoffs: new Map(), truncated: true };
+    }),
   ]);
   const bots = new Map();
   for (const r of names.results || []) {
@@ -322,6 +418,7 @@ async function buildAvaTurns(client, startIso, endIso) {
     for (const [id, list] of res.bySession) {
       const s = summarizeAvaSession(id, list, bot);
       s.preview = previewIds.has(id);
+      applyHandoff(s, details.handoffs.get(s.conversationId));
       sessions.push(s);
       turns.set(id, list);
     }
@@ -333,6 +430,7 @@ async function buildAvaTurns(client, startIso, endIso) {
     sessions,
     turns,
     truncated,
+    detailsTruncated: details.truncated,
   };
 }
 
@@ -341,21 +439,26 @@ function avaResponse(orgKey, build) {
   queueAnalyses(orgKey, build);
   const pending = new Set([...queue.values()].filter((j) => j.orgKey === orgKey).map((j) => j.session.id));
   let analyzed = 0;
+  let current = 0;
   const sessions = build.sessions.map((s) => {
     const a = savedAnalysis(orgKey, s);
     if (a) analyzed++;
-    return { ...s, analysis: a ? { intents: a.intents, refused: a.refused || false } : null, pending: pending.has(s.id) };
+    if (isCurrent(a)) current++;
+    const analysis = a ? { intents: a.intents, refused: a.refused || false, ...(isCurrent(a) ? { transferReason: a.transferReason, misunderstandings: a.misunderstandings } : { outdated: true }) } : null;
+    return { ...s, analysis, pending: pending.has(s.id) };
   });
   return {
     interval: build.interval,
     generatedAt: build.generatedAt,
     sessions,
     verdicts: VERDICTS,
-    meta: { turnsTruncated: build.truncated },
+    transferReasons: TRANSFER_REASONS,
+    meta: { turnsTruncated: build.truncated, detailsTruncated: build.detailsTruncated },
     analysis: {
       enabled: analysisEnabled(),
       model: MODEL,
       analyzed,
+      current,
       pending: pending.size,
       withRequests: build.sessions.filter((s) => s.customerTurns > 0).length,
       limit: MAX_ANALYSES,
@@ -364,4 +467,4 @@ function avaResponse(orgKey, build) {
   };
 }
 
-module.exports = { buildAvaTurns, avaResponse, displayBotName, summarizeAvaSession, avaTranscript, analysisInput, turnIssues, isAvaTurn, VERDICTS, SCHEMA, status };
+module.exports = { buildAvaTurns, avaResponse, displayBotName, applyHandoff, summarizeHandoff, TRANSFER_REASONS, summarizeAvaSession, avaTranscript, analysisInput, turnIssues, isAvaTurn, VERDICTS, SCHEMA, status };

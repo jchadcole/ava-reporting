@@ -115,3 +115,19 @@ test('withIntents keeps sessions with any or all of the picked intents', () => {
   assert.deepEqual(M.withIntents([a, b, c], ['Fees', 'Status']), [a, c]);
   assert.deepEqual(M.withIntents([a, b, c], ['Renew', 'Fees'], 'all'), [a]);
 });
+
+test('containment follows the three rules and the exclusions', () => {
+  const i = (supported, resolved, verdict = resolved ? 'valid' : 'not_valid') => ({ name: 'x', supported, resolved, verdict });
+  const s = (intentsList, over = {}, a = {}) => session({ transferred: false, endedNormally: true, ...over, analysis: { intents: intentsList, transferReason: 'none', misunderstandings: 0, ...a } });
+  const rule = (x) => M.containment(x).rule;
+  assert.equal(rule(s([i(true, true), i(true, true)])), 'full_resolution');
+  assert.equal(rule(s([i(true, true), i(false, false)], { transferred: true, endedNormally: false }, { transferReason: 'unsupported_intent' })), 'partial');
+  assert.equal(rule(s([i(true, true), i(false, false, 'no_chance')])), 'deflection');
+  assert.equal(rule(s([i(true, true), i(true, false)])), 'supported_unresolved');
+  assert.equal(rule(s([i(true, true)], { transferred: true }, { transferReason: 'system_error' })), 'breakdown');
+  assert.equal(rule(s([i(false, true)], { transferred: true }, { transferReason: 'unsupported_intent', misunderstandings: 3 })), 'breakdown');
+  assert.equal(rule(s([i(false, false)], { transferred: true }, { transferReason: 'customer_preference' })), 'transferred');
+  assert.equal(M.containment(s([i(true, true)], {}, { outdated: true })).status, null); // analyzed before these fields
+  const sum = M.containmentSummary([s([i(true, true)]), s([i(true, false)]), session({})]);
+  assert.deepEqual([sum.contained, sum.scored, sum.rate], [1, 2, 0.5]);
+});

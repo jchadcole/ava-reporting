@@ -72,3 +72,20 @@ test('sessions are analyzed in the background once, then served from the saved a
   const next = ava.analysisInput({ agentName: 'DMV Agent', botName: 'DMV Flow', media: 'Voice' }, 'AVA: hi', ['Renew driver license']);
   assert.match(next, /reuse one when it fits\):\nRenew driver license/);
 });
+
+test('transfers come from Genesys conversation detail after the AVA started', () => {
+  const base = () => ({ start: '2026-10-20T10:00:00Z', endReason: null });
+  const conv = ava.summarizeHandoff({ participants: [
+    { purpose: 'acd', participantName: 'Licensing', sessions: [{ segments: [{ segmentStart: '2026-10-20T10:05:00Z' }] }] },
+    { purpose: 'agent', sessions: [{ segments: [{ segmentType: 'alert', segmentStart: '2026-10-20T10:06:00Z' }, { segmentType: 'interact', segmentStart: '2026-10-20T10:06:10Z' }] }] },
+  ] });
+  assert.deepEqual(conv, { queueAt: '2026-10-20T10:05:00Z', agentAt: '2026-10-20T10:06:10Z', queueName: 'Licensing' });
+  const s = ava.applyHandoff(base(), conv);
+  assert.deepEqual([s.handoff, s.transferred, s.endedNormally, s.queueName], ['agent', true, false, 'Licensing']);
+  // A queue visit before the AVA started doesn't count.
+  assert.equal(ava.applyHandoff(base(), { queueAt: '2026-10-20T09:00:00Z', agentAt: null }).transferred, false);
+  // No conversation detail: only the AVA's own ending can say it transferred.
+  assert.equal(ava.applyHandoff(base(), undefined).transferred, null);
+  assert.equal(ava.applyHandoff({ ...base(), endReason: 'Exit: AgentRequestedByUser' }, undefined).transferred, true);
+  assert.equal(ava.applyHandoff({ ...base(), endReason: 'Exit: Error' }, { queueAt: null, agentAt: null }).endedNormally, false);
+});

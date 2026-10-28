@@ -5,7 +5,8 @@ Reporting for Genesys Cloud Agentic Virtual Agents (AVAs). This is dashboard v2:
 ## What's on the dashboard
 
 - **Filters**: Genesys org, date range (up to the last 10 days, since that is all the turn data Genesys keeps), AVA, channel, intent, valid response to all intents (yes, no, customer left first, no request, not analyzed yet), intent response (has a valid, partly valid or not valid one), Genesys flags, and preview sessions (left out by default). Filters apply to every panel and are kept in the URL.
-- **Key metrics**: AVA sessions, sessions with a valid response to all intents, intents with a valid response, intents detected (and per session), tool call success, guardrail blocks, sessions where the customer asked for a person, and median AVA reply time.
+- **Key metrics**: AVA sessions, contained sessions, sessions with a valid response to all intents, intents with a valid response, intents detected (and per session), tool call success, guardrail blocks, sessions where the customer asked for a person, and median AVA reply time.
+- **Containment**: contained and not-contained sessions by the rule that decided them (full task resolution, graceful partial containment, self-service deflection; or a supported intent not resolved, a transfer after an error or repeated misunderstanding, and so on), and why transferred sessions went to a person. The rules and where each input comes from are on the page.
 - **Intents**: each intent with its sessions and how many responses were valid, partly valid, not valid, or cut off because the customer left. Select a row to filter.
 - **How the AVA responded to each intent**: the four verdicts across all intents. Select one to filter.
 - **AVAs**: the same per AVA (all versions together), with tool calls, tool failures and guardrail blocks.
@@ -32,6 +33,7 @@ browser ── /api/ava, /api/ava/session ──▶ Node server ── OAuth cli
 | --- | --- |
 | Bot names and flow types; preview sessions | `POST /api/v2/analytics/bots/aggregates/query` |
 | Every AVA turn in the range (turns whose ask action carries `agentDetails`) | `GET /api/v2/analytics/botflows/{botId}/reportingturns?interval=…` for each bot |
+| Whether the conversation reached a queue or agent after the AVA (transfers for containment) | `POST /api/v2/analytics/conversations/details/query` (segment `purpose=botflow`) |
 | Drill-down transcript | `GET /api/v2/analytics/botflows/{botId}/reportingturns?sessionId=…` |
 
 The browser receives the AVA session rows for the date range and computes every panel locally (`public/metrics.js`). Turn data is cached on the server for two minutes.
@@ -46,7 +48,7 @@ cp .env.example .env   # fill in the Genesys OAuth client
 npm start              # same as: node --env-file=.env server/index.js → http://127.0.0.1:3000
 ```
 
-The OAuth client needs read access to analytics (bot aggregates and bot reporting turns).
+The OAuth client needs read access to analytics (bot aggregates, bot reporting turns and conversation details).
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -56,6 +58,7 @@ The OAuth client needs read access to analytics (bot aggregates and bot reportin
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Where the server listens |
 | `DASHBOARD_USER`, `DASHBOARD_PASSWORD` | unset | Turn on HTTP basic auth. Set these, or put the app behind SSO, before exposing it beyond your machine. |
 | `MAX_RANGE_DAYS` | `92` | Longest date range allowed |
+| `MAX_DETAIL_CONVERSATIONS` | `5000` | Conversation detail cap per load; beyond it, transfers come only from the AVA's own ending |
 | `MAX_TURN_PAGES_PER_BOT` | `40` | Pages of 250 turns read per bot |
 | `EXCLUDE_BOT_TYPES` | `VOICESURVEY` | Bot flow types left out of the report |
 | `MASK_SENSITIVE` | `true` | Mask long digit runs and sensitive slots in transcripts |

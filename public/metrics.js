@@ -51,6 +51,7 @@
       if (f.intent && !intents(s).some((i) => i.name === f.intent)) return false;
       if (f.verdict && sessionVerdict(s) !== f.verdict) return false;
       if (f.intentVerdict && !intents(s).some((i) => i.verdict === f.intentVerdict && (!f.intent || i.name === f.intent))) return false;
+      if (f.containment && (f.containment === 'unscored' ? containment(s).status !== null : containment(s).status !== f.containment)) return false;
       if (f.issues === 'yes' && !issueCount(s)) return false;
       if (f.issues === 'no' && issueCount(s)) return false;
       if (q && !`${s.conversationId || ''} ${s.id}`.toLowerCase().includes(q)) return false;
@@ -167,6 +168,71 @@
     }).sort((a, b) => b.sessions - a.sessions);
   }
 
+  // ---------- Containment ----------
+  // Chad's containment rules (2026-10-28). Inputs per session:
+  //   IsSupportedIntent / IntentResolved: Claude's judgment per intent (transcript)
+  //   TransferTriggered: Genesys, the conversation reached a queue or agent after the AVA, or the
+  //     AVA ended with a transfer; Claude's transfer reason only when Genesys has no detail
+  //   TransferReason: Claude (unsupported_intent, user_frustration, system_error, customer_preference)
+  //   FallbackLoopCount: Claude's count of times the AVA failed to understand the customer
+  //   SessionEndedNormally: Genesys, no transfer and no error ending
+  // Returns { status: 'contained' | 'not_contained' | null, rule, reason }; null when the session
+  // has no intents or hasn't been analyzed with these fields yet.
+  const CONTAINMENT_RULES = {
+    full_resolution: 'Full task resolution',
+    partial: 'Graceful partial containment',
+    deflection: 'Self-service deflection',
+  };
+  const NOT_CONTAINED = {
+    supported_unresolved: 'Supported intent not resolved',
+    breakdown: 'Transfer after an error or repeated misunderstanding',
+    transferred: 'Transferred to a person',
+    unsupported_unresolved: 'Unsupported intent not handed off',
+    customer_left: 'Customer left before it was resolved',
+  };
+
+  function containment(s) {
+    const a = s.analysis;
+    const list = intents(s);
+    if (!a || a.outdated || a.refused || !list.length || list.some((i) => typeof i.resolved !== 'boolean')) return { status: null };
+    const transferred = s.transferred ?? (a.transferReason ? a.transferReason !== 'none' : null);
+    const reason = a.transferReason && a.transferReason !== 'none' ? a.transferReason : null;
+    const loops = a.misunderstandings || 0;
+    const no = (key) => ({ status: 'not_contained', rule: key, reason: NOT_CONTAINED[key] });
+    const yes = (key) => ({ status: 'contained', rule: key, reason: CONTAINMENT_RULES[key] });
+    // Exclusions apply whatever else happened.
+    if (list.some((i) => i.supported && !i.resolved && i.verdict !== 'no_chance')) return no('supported_unresolved');
+    if (transferred && (reason === 'system_error' || loops > 2)) return no('breakdown');
+    // 1. Full task resolution: no transfer, every intent supported and resolved.
+    if (!transferred && list.every((i) => i.supported && i.resolved)) return yes('full_resolution');
+    // 2. Graceful partial containment: handed off only because of an unsupported intent, after resolving a supported one.
+    if (transferred && reason === 'unsupported_intent' && list.some((i) => i.supported && i.resolved)) return yes('partial');
+    // 3. Self-service deflection: ended normally with no transfer and every intent it handled resolved.
+    const handled = list.filter((i) => i.verdict !== 'no_chance');
+    if (s.endedNormally && !transferred && handled.length && handled.every((i) => i.resolved)) return yes('deflection');
+    if (transferred) return no('transferred');
+    if (list.some((i) => !i.supported && !i.resolved && i.verdict !== 'no_chance')) return no('unsupported_unresolved');
+    return no('customer_left');
+  }
+
+  function containmentSummary(sessions) {
+    const counts = {};
+    let contained = 0;
+    let scored = 0;
+    for (const s of sessions) {
+      const c = containment(s);
+      if (!c.status) continue;
+      scored++;
+      if (c.status === 'contained') contained++;
+      counts[c.rule] = (counts[c.rule] || 0) + 1;
+    }
+    const rows = [
+      ...Object.entries(CONTAINMENT_RULES).map(([key, label]) => ({ key, label, contained: true, count: counts[key] || 0 })),
+      ...Object.entries(NOT_CONTAINED).map(([key, label]) => ({ key, label, contained: false, count: counts[key] || 0 })),
+    ];
+    return { contained, scored, rate: ratio(contained, scored), rows };
+  }
+
   // ---------- Journey flows ----------
   // Each session with intents becomes a path: Start → intent 1 → intent 2 → … → outcome.
   // Nodes are keyed by step and intent, so the same intent at step 1 and step 2 are separate
@@ -274,7 +340,7 @@
     return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
   }
 
-  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, localDay };
+  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, localDay };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -24,7 +24,7 @@
     return `${h}h ${String(m % 60).padStart(2, '0')}m`;
   }
 
-  const FILTER_IDS = { agent: 'f-agent', media: 'f-media', intent: 'f-intent', verdict: 'f-verdict', intentVerdict: 'f-intentverdict', issues: 'f-issues', preview: 'f-preview' };
+  const FILTER_IDS = { agent: 'f-agent', media: 'f-media', intent: 'f-intent', verdict: 'f-verdict', intentVerdict: 'f-intentverdict', issues: 'f-issues', preview: 'f-preview', containment: 'f-containment' };
   const ISSUE_LABEL = { error: 'Error', guardrail: 'Guardrail block', tool_failed: 'Tool failed', no_reply: 'No reply' };
 
   const state = {
@@ -33,7 +33,7 @@
     range: '7',
     from: null,
     to: null,
-    filters: { agent: '', media: '', intent: '', verdict: '', intentVerdict: '', issues: '', preview: '', search: '' },
+    filters: { agent: '', media: '', intent: '', verdict: '', intentVerdict: '', issues: '', preview: '', containment: '', search: '' },
     data: null,
     filtered: [],
     page: 1,
@@ -217,6 +217,7 @@
     renderKpis(M.summarize(state.filtered));
     renderIntents(M.intentTable(state.filtered));
     renderVerdicts(M.summarize(state.filtered).intentVerdicts);
+    renderContainment();
     renderAgents(M.agentTable(state.filtered));
     renderSessions();
     renderDefinitions();
@@ -230,6 +231,10 @@
   function renderKpis(s) {
     const tiles = [
       { label: 'AVA sessions', value: num(s.sessions), sub: `${num(s.analyzed)} read by Claude` },
+      (() => {
+        const c = M.containmentSummary(state.filtered);
+        return { label: 'Contained', value: pct(c.rate, 1), meter: c.rate, sub: c.scored ? `${num(c.contained)} of ${num(c.scored)} sessions with intents` : 'Waiting for Claude’s analysis' };
+      })(),
       { label: 'Valid response to all intents', value: pct(s.allValidRate, 1), meter: s.allValidRate, sub: s.scored ? `${num(s.allValid)} of ${num(s.scored)} sessions` : 'No analyzed sessions yet' },
       { label: 'Intents with a valid response', value: pct(s.validIntentRate, 1), meter: s.validIntentRate, sub: `${num(s.intentVerdicts.valid)} of ${num(s.judgedIntents)} intents` },
       { label: 'Intents detected', value: num(s.intents), sub: s.intentsPerSession != null ? `${num(s.intentsPerSession, 1)} per session · ${num(s.multiIntent)} with more than one` : '–' },
@@ -256,6 +261,46 @@
         : `<tr class="empty"><td colspan="7">${state.data.analysis.enabled ? 'No intents in these sessions yet.' : 'Intents appear once Claude analysis is turned on.'}</td></tr>`) + '</tbody>';
     bindRowFilter(el, 'intent');
     renderShowMore('intents', rows.length);
+  }
+
+  // Contained and not-contained sessions by the rule that decided them, plus transfer reasons.
+  function renderContainment() {
+    const c = M.containmentSummary(state.filtered);
+    const el = $('containment');
+    if (!c.scored) {
+      el.innerHTML = `<div class="empty-state">${state.data.analysis.enabled ? 'Containment appears as Claude finishes analyzing sessions with the containment fields.' : 'Containment needs Claude analysis.'}</div>`;
+    } else {
+      const max = Math.max(...c.rows.map((r) => r.count), 1);
+      el.innerHTML = c.rows.map((r) => `<div class="bar-row${state.filters.containment === (r.contained ? 'contained' : 'not_contained') ? ' active' : ''}" data-key="${r.contained ? 'contained' : 'not_contained'}" tabindex="0" role="button">
+          <span class="bar-label">${r.contained ? '✓' : '✕'} ${esc(r.label)}</span>
+          <span class="bar-value">${num(r.count)} · ${pct(r.count / c.scored)}</span>
+          <div class="bar-track"><div class="bar-fill ${r.contained ? 'v-bg-valid' : 'v-bg-not_valid'}" style="width:${((r.count / max) * 100).toFixed(1)}%"></div></div>
+        </div>`).join('');
+      el.querySelectorAll('.bar-row').forEach((row) => {
+        const toggle = () => setFilter('containment', state.filters.containment === row.dataset.key ? '' : row.dataset.key);
+        row.addEventListener('click', toggle);
+        row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+      });
+    }
+    const reasons = new Map();
+    for (const s of state.filtered) {
+      const r = s.analysis?.transferReason;
+      if (s.transferred && r && r !== 'none') reasons.set(r, (reasons.get(r) || 0) + 1);
+    }
+    const rows = state.data.transferReasons.filter((r) => reasons.has(r.key)).map((r) => ({ label: r.label, count: reasons.get(r.key) })).sort((a, b) => b.count - a.count);
+    const total = rows.reduce((a, r) => a + r.count, 0);
+    const max = Math.max(...rows.map((r) => r.count), 1);
+    const transferred = state.filtered.filter((s) => s.transferred).length;
+    $('transfer-reasons').innerHTML = rows.length ? `<p class="muted small">${num(transferred)} sessions were transferred to a person after the AVA (Genesys). Reasons from Claude:</p>` + rows.map((r) => `<div class="bar-row" style="cursor:default">
+        <span class="bar-label">${esc(r.label)}</span><span class="bar-value">${num(r.count)} · ${pct(r.count / total)}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${((r.count / max) * 100).toFixed(1)}%"></div></div></div>`).join('')
+      : `<div class="empty-state">${transferred ? `${num(transferred)} sessions were transferred; reasons appear as Claude analyzes them.` : 'No transfers to a person in these sessions.'}</div>`;
+  }
+
+  function containmentBadge(s) {
+    const c = M.containment(s);
+    if (!c.status) return '<span class="muted">–</span>';
+    return `<span class="badge ${c.status === 'contained' ? 'yes' : 'no'}" title="${esc(c.reason)}">${c.status === 'contained' ? 'Contained' : 'Not contained'}</span>`;
   }
 
   function renderVerdicts(t) {
@@ -309,6 +354,7 @@
     { key: 'media', label: 'Channel', value: (s) => s.media || '' },
     { key: 'intents', label: 'Intents detected', value: (s) => M.intents(s).map((i) => i.name).join(' > ') },
     { key: 'verdict', label: 'Valid response to all?', value: (s) => VERDICT_ORDER.indexOf(M.sessionVerdict(s)), num: true },
+    { key: 'containment', label: 'Containment', value: (s) => ({ contained: 0, not_contained: 1 })[M.containment(s).status] ?? 2, num: true },
     { key: 'customerTurns', label: 'Customer turns', value: (s) => s.customerTurns, num: true },
     { key: 'toolCalls', label: 'Tools', value: (s) => s.toolCalls, num: true },
     { key: 'issues', label: 'Genesys flags', value: (s) => M.issueCount(s), num: true },
@@ -357,10 +403,11 @@
         <td>${esc(s.media || '')}</td>
         <td>${intentChips(s)}</td>
         <td class="num">${verdictBadge(s)}</td>
+        <td class="num">${containmentBadge(s)}</td>
         <td class="num">${num(s.customerTurns)}</td>
         <td class="num">${num(s.toolCalls)}</td>
         <td class="num">${M.issueCount(s) ? `<span class="v-not_valid" title="${esc(issuesText(s))}">${num(M.issueCount(s))}</span>` : '<span class="muted">0</span>'}</td></tr>`).join('')
-        : '<tr class="empty"><td colspan="8">No AVA sessions match these filters.</td></tr>') + '</tbody>';
+        : '<tr class="empty"><td colspan="9">No AVA sessions match these filters.</td></tr>') + '</tbody>';
     el.querySelectorAll('th[data-sort]').forEach((th) => th.addEventListener('click', () => {
       const k = th.dataset.sort;
       state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : ['start', 'customerTurns', 'toolCalls', 'issues'].includes(k) ? -1 : 1 };
@@ -386,12 +433,12 @@
 
   function exportCsv() {
     const rows = sortedSessions();
-    const header = ['Started', 'AVA', 'AVA versions', 'Bot flow', 'Channel', 'Intents (in order)', 'Intent verdicts', 'Valid response to all intents', 'Customer turns', 'Tool calls', 'Genesys flags', 'Conversation ID', 'Bot session ID', 'Preview'];
+    const header = ['Started', 'AVA', 'AVA versions', 'Bot flow', 'Channel', 'Intents (in order)', 'Intent verdicts', 'Valid response to all intents', 'Containment', 'Containment rule', 'Transferred (Genesys)', 'Transfer reason', 'Misunderstandings', 'Customer turns', 'Tool calls', 'Genesys flags', 'Conversation ID', 'Bot session ID', 'Preview'];
     const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const lines = [header.map(cell).join(',')].concat(rows.map((s) => [
       s.start, s.agentName, (s.agents || []).map((a) => a.version).join(' '), s.botName, s.media,
       M.intents(s).map((i) => i.name).join(' > '), M.intents(s).map((i) => `${i.name}: ${verdictLabel(i.verdict)}`).join('; '),
-      M.SESSION_VERDICT_LABEL[M.sessionVerdict(s)], s.customerTurns, s.toolCalls, issuesText(s), s.conversationId, s.id, s.preview ? 'yes' : 'no',
+      M.SESSION_VERDICT_LABEL[M.sessionVerdict(s)], M.containment(s).status || '', M.containment(s).reason || '', s.transferred == null ? '' : s.transferred ? 'yes' : 'no', s.analysis?.transferReason || '', s.analysis?.misunderstandings ?? '', s.customerTurns, s.toolCalls, issuesText(s), s.conversationId, s.id, s.preview ? 'yes' : 'no',
     ].map(cell).join(',')));
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
@@ -444,6 +491,10 @@
   function factsHtml(s) {
     const facts = [
       ['Valid response to all intents', verdictBadge(s)],
+      ['Containment', M.containment(s).status ? `${containmentBadge(s)}<div class="cell-sub">${esc(M.containment(s).reason)}</div>` : '–'],
+      ['Transferred to a person', s.transferred == null ? 'Unknown' : s.transferred ? esc(`Yes${s.handoff === 'agent' ? ', reached an agent' : s.handoff === 'queue' ? ', sent to a queue' : ''}${s.queueName ? ` (${s.queueName})` : ''}`) : 'No'],
+      ['Transfer reason (Claude)', esc(state.data.transferReasons.find((r) => r.key === s.analysis?.transferReason)?.label || '–')],
+      ['Misunderstandings (Claude)', num(s.analysis?.misunderstandings ?? null)],
       ['AVA versions', esc((s.agents || []).map((a) => `v${a.version}`).join(', ') || '–')],
       ['Customer turns', num(s.customerTurns)],
       ['AVA session length', fmtDuration(s.start && s.end ? Date.parse(s.end) - Date.parse(s.start) : null)],
@@ -463,7 +514,7 @@
     else if (!s.analysis) inner = `<div class="empty-state">${s.pending ? 'Claude is reading this session now.' : state.data.analysis.enabled ? 'Not analyzed yet. Refresh to continue the analysis.' : 'Turn on Claude analysis to list intents.'}</div>`;
     else if (s.analysis.refused) inner = '<div class="empty-state">Claude declined to analyze this conversation.</div>';
     else if (!list.length) inner = '<div class="empty-state">Claude found no customer request in this session.</div>';
-    else inner = `<ol class="intent-list">${list.map((i) => `<li><div class="intent-head"><span class="cell-strong">${esc(i.name)}</span><span class="chip v-${esc(i.verdict)}">${esc(verdictLabel(i.verdict))}</span></div><div class="cell-sub">Customer: ${esc(i.customerAsked)}</div><div class="why-text">${esc(i.why)}</div></li>`).join('')}</ol>`;
+    else inner = `<ol class="intent-list">${list.map((i) => `<li><div class="intent-head"><span class="cell-strong">${esc(i.name)}</span><span class="chip v-${esc(i.verdict)}">${esc(verdictLabel(i.verdict))}</span>${typeof i.supported === 'boolean' ? `<span class="chip">${i.supported ? 'Supported' : 'Not supported'}</span><span class="chip ${i.resolved ? 'v-valid' : 'v-not_valid'}">${i.resolved ? 'Resolved' : 'Not resolved'}</span>` : ''}</div><div class="cell-sub">Customer: ${esc(i.customerAsked)}</div><div class="why-text">${esc(i.why)}</div></li>`).join('')}</ol>`;
     return `<section><h3>Intents detected${list.length ? ` (${list.length})` : ''}</h3>${inner}</section>`;
   }
 

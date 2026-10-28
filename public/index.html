@@ -58,6 +58,14 @@
         <option value="not_valid">Has one not valid</option>
       </select>
     </label>
+    <label class="field"><span>Containment</span>
+      <select id="f-containment">
+        <option value="">Any</option>
+        <option value="contained">Contained</option>
+        <option value="not_contained">Not contained</option>
+        <option value="unscored">Not scored yet</option>
+      </select>
+    </label>
     <label class="field"><span>Genesys flags</span>
       <select id="f-issues">
         <option value="">Any</option>
@@ -81,6 +89,17 @@
   <main id="main">
   <div id="view-overview">
     <section class="kpis" id="kpis" aria-label="Key metrics"></section>
+
+    <section class="grid two">
+      <article class="card">
+        <header class="card-head"><h2>Containment</h2><span class="muted small">Select a row to filter</span></header>
+        <div id="containment" class="bar-list"></div>
+      </article>
+      <article class="card">
+        <header class="card-head"><h2>Why sessions were transferred</h2></header>
+        <div id="transfer-reasons" class="bar-list"></div>
+      </article>
+    </section>
 
     <section class="grid two wide-left">
       <article class="card">
@@ -123,6 +142,14 @@
         <dt>Intents detected</dt><dd>Genesys does not record an intent on AVA turns, so Claude reads each session’s AVA transcript (card numbers, PINs and similar values masked) and lists every distinct thing the customer wanted to get done or find out, in the order raised. Greetings, thanks and answers to the AVA’s own questions (name, date of birth, yes or no) are not intents. Asking for a person is. Claude is shown the intent names already used for that AVA so the same request gets the same name.</dd>
         <dt>Valid response</dt><dd id="verdict-defs"></dd>
         <dt>Valid response to all intents</dt><dd><b>Yes</b> when every intent the AVA had a chance to answer got a valid response. <b>No</b> when at least one was partly valid or not valid. Intents cut off because the customer left are not held against the AVA; a session where that happened to every intent shows “Customer left first”. Sessions where the customer never said anything show “No request”.</dd>
+        <dt>Contained</dt><dd>A session with at least one intent is contained when it meets one of three rules and none of the exclusions.
+          <ul>
+            <li><b>Full task resolution</b>: no transfer to a person, and every intent was supported and resolved.</li>
+            <li><b>Graceful partial containment</b>: transferred only because an intent was unsupported by design, after the AVA resolved at least one supported intent.</li>
+            <li><b>Self-service deflection</b>: the session ended normally with no transfer, and every intent the AVA got to handle was resolved.</li>
+          </ul>
+          Never contained: a supported intent the AVA had a chance to answer but did not resolve, or a transfer caused by an error or by more than two misunderstandings.
+          <br>Where each input comes from. <b>Genesys</b>: transferred (the conversation reached a queue or an agent after the AVA started, or the AVA ended with a transfer) and ended normally (no transfer, no error ending). <b>Claude</b>, inferred from the transcript: whether each intent is supported and resolved, the transfer reason (unsupported intent, customer frustration, system error, customer preference) and the number of misunderstandings. Sessions analyzed before these fields existed show no containment until Claude re-reads them.</dd>
         <dt>Genesys flags</dt><dd>What Genesys itself recorded on the AVA’s turns, with no AI judgment: an error result, a guardrail that blocked a reply, a tool call that did not succeed, or customer input that got no reply. A flag doesn’t always mean a bad response (a guardrail can rightly block a request), and a response can be wrong without any flag, which is why the verdicts come from reading the transcript.</dd>
         <dt>AVA reply time</dt><dd>For each customer turn, the time from when Genesys captured the customer’s input until the AVA had its reply ready.</dd>
         <dt>Data window</dt><dd>Everything here comes from Genesys’s turn-level data, which it appears to keep for only about the last 10 days, so ranges further back come up empty.</dd>
