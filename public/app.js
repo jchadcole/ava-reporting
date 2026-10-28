@@ -239,13 +239,9 @@
         const c = M.abandonmentSummary(state.filtered);
         return { label: 'Abandoned', value: pct(c.rate, 1), meter: c.rate, sub: c.scored ? `${num(c.abandoned)} of ${num(c.scored)} sessions with intents` : 'Waiting for Claude’s analysis' };
       })(),
-      { label: 'Valid response to all intents', value: pct(s.allValidRate, 1), meter: s.allValidRate, sub: s.scored ? `${num(s.allValid)} of ${num(s.scored)} sessions` : 'No analyzed sessions yet' },
-      { label: 'Intents with a valid response', value: pct(s.validIntentRate, 1), meter: s.validIntentRate, sub: `${num(s.intentVerdicts.valid)} of ${num(s.judgedIntents)} intents` },
       { label: 'Intents detected', value: num(s.intents), sub: s.intentsPerSession != null ? `${num(s.intentsPerSession, 1)} per session · ${num(s.multiIntent)} with more than one` : '–' },
       { label: 'Tool call success', value: pct(s.toolSuccessRate, 1), meter: s.toolSuccessRate, sub: `${num(s.toolCalls)} calls · ${num(s.toolFailures)} failed` },
       { label: 'Guardrail blocks', value: num(s.guardrails), sub: `${num(s.errors)} errors or missing replies` },
-      { label: 'Asked for a person', value: num(s.agentRequested), sub: 'Sessions where the customer asked the AVA for an agent' },
-      { label: 'AVA reply time', value: fmtMs(s.medianResponseMs), sub: s.responseTurns ? `Median of ${num(s.responseTurns)} turns` : 'No turn timing reported' },
     ];
     $('kpis').innerHTML = tiles
       .map((t) => `<div class="kpi"><div class="kpi-label">${esc(t.label)}</div><div class="kpi-value">${esc(t.value)}</div>` +
@@ -703,8 +699,42 @@
     sel.disabled = state.orgs.length < 2;
   }
 
+  // Every panel under the Overview tiles can be collapsed from its heading; the choice is
+  // remembered per browser.
+  const COLLAPSE_KEY = 'ava-collapsed-panels';
+  function readCollapsed() {
+    try { return new Set(JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]')); } catch { return new Set(); }
+  }
+  function setupCollapsible() {
+    const collapsed = readCollapsed();
+    document.querySelectorAll('#view-overview .card').forEach((card) => {
+      const h2 = card.querySelector('h2');
+      if (!h2) return;
+      const id = h2.firstChild.textContent.trim();
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'collapse-toggle';
+      btn.innerHTML = '<span class="chev" aria-hidden="true">▾</span>';
+      btn.append(...h2.childNodes);
+      h2.appendChild(btn);
+      const apply = (on) => {
+        card.classList.toggle('collapsed', on);
+        btn.setAttribute('aria-expanded', String(!on));
+      };
+      apply(collapsed.has(id));
+      btn.addEventListener('click', () => {
+        const on = !card.classList.contains('collapsed');
+        apply(on);
+        const now = readCollapsed();
+        if (on) now.add(id); else now.delete(id);
+        try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...now])); } catch { /* collapse still works for this visit */ }
+      });
+    });
+  }
+
   async function init() {
     readHash();
+    setupCollapsible();
     if (![...$('f-range').options].some((o) => o.value === state.range)) state.range = '7';
     $('f-range').value = state.range;
     $('f-from').value = state.from || '';
