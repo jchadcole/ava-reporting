@@ -239,7 +239,7 @@ table.data .empty td { cursor: default; color: var(--muted); text-align: center;
 
 /* View tabs */
 .tabs { display: flex; gap: 4px; max-width: 1440px; margin: 0 auto; padding: 0 24px; }
-#view-overview, #view-escalations { display: flex; flex-direction: column; gap: 16px; }
+#view-overview, #view-journey { display: flex; flex-direction: column; gap: 16px; }
 @media (max-width: 640px) { .tabs { padding: 0 16px; } }
 .tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 12px; font: inherit; font-weight: 500; color: var(--muted); cursor: pointer; margin-bottom: -1px; }
 .tab:hover { color: var(--text); }
@@ -290,3 +290,28 @@ span.v-not_valid { color: var(--critical); font-weight: 600; }
 .intent-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 12px; }
 .intent-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .definitions dd ul { margin: 6px 0; padding-left: 18px; }
+
+/* Journey Flows */
+#view-journey { display: flex; flex-direction: column; gap: 16px; }
+.field.inline { flex-direction: row; align-items: center; gap: 6px; }
+.journey-hint { margin: 0 0 8px; }
+.journey-wrap { overflow-x: auto; }
+.journey-svg { display: block; font-size: 12px; }
+.journey-svg .j-head { fill: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.journey-svg .j-link { opacity: 0.28; cursor: pointer; transition: opacity 0.15s; }
+.journey-svg .j-link:hover, .journey-svg .j-link:focus-visible { opacity: 0.5; outline: none; }
+.journey-svg.tracing .j-link { opacity: 0.08; }
+.journey-svg .j-link-hi { opacity: 0.7; pointer-events: none; }
+.journey-svg .j-link-hi.exact { opacity: 0.85; }
+.journey-svg .j-node { cursor: pointer; outline: none; }
+.journey-svg .j-start { cursor: default; }
+.journey-svg .j-node.dim { opacity: 0.3; }
+.journey-svg .j-node:focus-visible .j-bar { stroke: var(--text); stroke-width: 2; }
+.journey-svg .j-label { paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; }
+.journey-svg .j-name { fill: var(--text); font-weight: 500; }
+.journey-svg .j-val { fill: var(--muted); font-variant-numeric: tabular-nums; }
+.journey-focus { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.journey-focus .crumb { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); }
+.journey-focus .crumb button { border: 0; background: none; color: var(--muted); cursor: pointer; font: inherit; padding: 0 4px; }
+.tt-foot { margin-top: 6px; font-size: 11px; color: var(--muted); }
+.path-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }

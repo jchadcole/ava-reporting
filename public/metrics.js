@@ -167,12 +167,105 @@
     }).sort((a, b) => b.sessions - a.sessions);
   }
 
+  // ---------- Journey flows ----------
+  // Each session with intents becomes a path: Start → intent 1 → intent 2 → … → outcome.
+  // Nodes are keyed by step and intent, so the same intent at step 1 and step 2 are separate
+  // nodes. Steps past `maxSteps` fold into one "More intents" node; past the `maxPerStep`
+  // most common intents at a step, the rest fold into "Other intents".
+  const OUTCOMES = [
+    { key: 'all_valid', label: 'Valid to all intents' },
+    { key: 'not_all_valid', label: 'Not valid to all intents' },
+    { key: 'customer_left', label: 'Customer left first' },
+  ];
+  const OTHER = 'Other intents';
+  const SEQ = 'seq:';
+  const sequenceFocus = (names) => SEQ + names.join('\u0001');
+  const MORE = 'More intents';
+
+  function journeyGraph(sessions, { maxSteps = 4, maxPerStep = 8, focus = [] } = {}) {
+    const raw = sessions.filter((s) => intents(s).length).map((s) => ({ id: s.id, names: intents(s).map((i) => i.name), outcome: sessionVerdict(s) }));
+    // Most common intents per step, counted before folding so the cut is stable.
+    const keep = [];
+    for (let step = 1; step <= maxSteps; step++) {
+      const counts = new Map();
+      for (const r of raw) if (r.names[step - 1]) counts.set(r.names[step - 1], (counts.get(r.names[step - 1]) || 0) + 1);
+      keep[step] = new Set([...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, maxPerStep).map(([n]) => n));
+    }
+    const nodeId = (step, label) => `${step}|${label}`;
+    let paths = raw.map((r) => {
+      const nodes = [nodeId(0, 'Start')];
+      r.names.slice(0, maxSteps).forEach((n, i) => nodes.push(nodeId(i + 1, keep[i + 1].has(n) ? n : OTHER)));
+      if (r.names.length > maxSteps) nodes.push(nodeId(maxSteps + 1, MORE));
+      nodes.push(nodeId('end', r.outcome));
+      return { sessionId: r.id, intents: r.names, outcome: r.outcome, nodes };
+    });
+    const allTotal = paths.length;
+    // Focus keeps only the sessions that pass through every focused node (or link "a>b"),
+    // or whose intents are exactly a focused sequence.
+    for (const f of focus) {
+      if (f.startsWith(SEQ)) {
+        paths = paths.filter((p) => sequenceFocus(p.intents) === f);
+        continue;
+      }
+      const [a, b] = f.split('>');
+      paths = paths.filter((p) => {
+        const i = p.nodes.indexOf(a);
+        return i >= 0 && (b === undefined || p.nodes[i + 1] === b);
+      });
+    }
+    const nodes = new Map();
+    const links = new Map();
+    for (const p of paths) {
+      p.nodes.forEach((id, i) => {
+        if (!nodes.has(id)) {
+          const [step, label] = id.split(/\|(.*)/s);
+          const kind = step === '0' ? 'start' : step === 'end' ? 'outcome' : label === OTHER ? 'other' : label === MORE ? 'more' : 'intent';
+          nodes.set(id, { id, step: step === 'end' ? Infinity : Number(step), label: kind === 'outcome' ? OUTCOMES.find((o) => o.key === label)?.label || label : label, key: label, kind, count: 0 });
+        }
+        nodes.get(id).count++;
+        if (i) {
+          const key = `${p.nodes[i - 1]}>${id}`;
+          if (!links.has(key)) links.set(key, { id: key, source: p.nodes[i - 1], target: id, count: 0 });
+          links.get(key).count++;
+        }
+      });
+    }
+    return { total: paths.length, allTotal, paths, nodes: [...nodes.values()], links: [...links.values()], maxSteps };
+  }
+
+  // Link counts for a subset of a graph's paths, for highlighting the flow through a node or link.
+  function linkCounts(paths) {
+    const out = new Map();
+    for (const p of paths) for (let i = 1; i < p.nodes.length; i++) {
+      const key = `${p.nodes[i - 1]}>${p.nodes[i]}`;
+      out.set(key, (out.get(key) || 0) + 1);
+    }
+    return out;
+  }
+
+  // The most common full intent sequences, for the table under the graph.
+  function topPaths(sessions, limit = 15) {
+    const rows = new Map();
+    for (const s of sessions) {
+      const names = intents(s).map((i) => i.name);
+      if (!names.length) continue;
+      const key = names.join(' → ');
+      if (!rows.has(key)) rows.set(key, { path: names, sessions: 0, allValid: 0, scored: 0 });
+      const r = rows.get(key);
+      r.sessions++;
+      const v = sessionVerdict(s);
+      if (v === 'all_valid' || v === 'not_all_valid') r.scored++;
+      if (v === 'all_valid') r.allValid++;
+    }
+    return [...rows.values()].map((r) => ({ ...r, allValidRate: ratio(r.allValid, r.scored) })).sort((a, b) => b.sessions - a.sessions).slice(0, limit);
+  }
+
   function localDay(d) {
     const x = new Date(d);
     return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
   }
 
-  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, localDay };
+  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, journeyGraph, linkCounts, topPaths, sequenceFocus, OUTCOMES, localDay };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);

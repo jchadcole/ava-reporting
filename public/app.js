@@ -40,6 +40,8 @@
     sort: { key: 'start', dir: -1 },
     detailCache: new Map(),
     expanded: { intents: false, agents: false },
+    tab: 'overview',
+    journey: { steps: 4, per: 8, focus: [] }, // focus: [{ id, label }] from clicks on the graph
   };
   const TABLE_PREVIEW_ROWS = 10;
   const verdictLabel = (key) => state.data?.verdicts.find((v) => v.key === key)?.label || key;
@@ -74,6 +76,9 @@
     if (p.get('from')) state.from = p.get('from');
     if (p.get('to')) state.to = p.get('to');
     for (const k of Object.keys(state.filters)) if (p.get(k)) state.filters[k] = p.get(k);
+    if (p.get('tab') === 'journey') state.tab = 'journey';
+    if (Number(p.get('steps'))) state.journey.steps = Number(p.get('steps'));
+    if (Number(p.get('per'))) state.journey.per = Number(p.get('per'));
   }
   function writeHash() {
     const p = new URLSearchParams();
@@ -84,6 +89,11 @@
       if (state.to) p.set('to', state.to);
     }
     for (const [k, v] of Object.entries(state.filters)) if (v) p.set(k, v);
+    if (state.tab === 'journey') {
+      p.set('tab', 'journey');
+      p.set('steps', state.journey.steps);
+      p.set('per', state.journey.per);
+    }
     history.replaceState(null, '', `#${p.toString()}`);
   }
 
@@ -206,6 +216,11 @@
     renderAgents(M.agentTable(state.filtered));
     renderSessions();
     renderDefinitions();
+    if (state.tab === 'journey') {
+      // Don't redraw the graph under the pointer while new analyses stream in; catch up on leave.
+      if (journeyHover) journeyStale = true;
+      else renderJourney();
+    }
   }
 
   function renderKpis(s) {
@@ -468,6 +483,77 @@
     return `<section><h3>AVA transcript</h3><div class="transcript">${html}</div></section>`;
   }
 
+  // ---------- Journey Flows ----------
+  function showTooltip(e, title, rows, foot) {
+    const tt = $('tooltip');
+    tt.innerHTML = `<div class="tt-title">${esc(title)}</div>` + rows.map(([k, v]) => `<div class="tt-row"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('') + (foot ? `<div class="tt-foot">${esc(foot)}</div>` : '');
+    tt.hidden = false;
+    const pad = 14;
+    const rect = tt.getBoundingClientRect();
+    let left = e.clientX + pad;
+    if (left + rect.width > window.innerWidth - 8) left = e.clientX - rect.width - pad;
+    let top = e.clientY + pad;
+    if (top + rect.height > window.innerHeight - 8) top = e.clientY - rect.height - pad;
+    tt.style.left = `${Math.max(8, left)}px`;
+    tt.style.top = `${Math.max(8, top)}px`;
+  }
+  const hideTooltip = () => { $('tooltip').hidden = true; };
+
+  function setTab(tab) {
+    state.tab = tab;
+    document.querySelectorAll('.tab').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+    $('view-overview').hidden = tab !== 'overview';
+    $('view-journey').hidden = tab !== 'journey';
+    writeHash();
+    if (tab === 'journey' && state.data) renderJourney();
+  }
+
+  let journeyHover = false;
+  let journeyStale = false;
+
+  function focusJourney(id, label) {
+    if (!state.journey.focus.some((f) => f.id === id)) state.journey.focus.push({ id, label });
+    renderJourney();
+  }
+
+  function renderJourney() {
+    const j = state.journey;
+    $('j-steps').value = String(j.steps);
+    $('j-per').value = String(j.per);
+    const opts = { maxSteps: j.steps, maxPerStep: j.per };
+    const full = M.journeyGraph(state.filtered, opts);
+    const graph = M.journeyGraph(state.filtered, { ...opts, focus: j.focus.map((f) => f.id) });
+    $('journey-count').textContent = j.focus.length ? `(${num(graph.total)} of ${num(full.total)} sessions)` : `(${num(full.total)} sessions)`;
+    const crumbs = $('journey-focus');
+    crumbs.hidden = !j.focus.length;
+    crumbs.innerHTML = j.focus.length ? `<span class="muted small">Focused on</span>${j.focus.map((f, i) => `<span class="crumb">${esc(f.label)}<button type="button" data-i="${i}" aria-label="Remove ${esc(f.label)}">✕</button></span>`).join('')}<button type="button" class="btn btn-ghost" id="j-clear">Show all</button>` : '';
+    crumbs.querySelectorAll('button[data-i]').forEach((b) => b.addEventListener('click', () => { j.focus.splice(Number(b.dataset.i), 1); renderJourney(); }));
+    if (j.focus.length) $('j-clear').addEventListener('click', () => { j.focus = []; renderJourney(); });
+    const stepLabel = (i, cols) => (i === 0 ? 'Start' : i === cols - 1 ? 'Outcome' : i > j.steps ? 'Later' : `Intent ${i}`);
+    window.AvaJourney.render($('journey'), graph, { colors: window.AvaJourney.colorMap(full), onFocus: focusJourney, tooltip: showTooltip, hideTooltip, columnLabels: stepLabel });
+    renderTopPaths(graph);
+  }
+
+  function renderTopPaths(graph) {
+    const ids = new Set(graph.paths.map((p) => p.sessionId));
+    const rows = M.topPaths(state.filtered.filter((s) => ids.has(s.id)));
+    const el = $('journey-paths');
+    el.innerHTML = '<thead><tr><th>Intents in order</th><th class="num">Sessions</th><th class="num">Share of all</th><th class="num">Valid to all intents</th></tr></thead><tbody>' +
+      (rows.length ? rows.map((r, i) => `<tr data-i="${i}" tabindex="0"><td><div class="path-cell">${r.path.map((n) => `<span class="chip">${esc(n)}</span>`).join('<span class="path-arrow" aria-hidden="true">→</span>')}</div></td><td class="num">${num(r.sessions)}</td><td class="num">${pct(r.sessions / graph.allTotal, 1)}</td>${rateCell(r.allValidRate)}</tr>`).join('')
+        : '<tr class="empty"><td colspan="4">No journeys match.</td></tr>') + '</tbody>';
+    // Selecting a row focuses the graph on the sessions with exactly that sequence of intents.
+    el.querySelectorAll('tbody tr[data-i]').forEach((tr) => {
+      const r = rows[Number(tr.dataset.i)];
+      const act = () => {
+        state.journey.focus = [{ id: M.sequenceFocus(r.path), label: r.path.join(' → ') }];
+        renderJourney();
+        $('journey').scrollIntoView({ block: 'start', behavior: 'smooth' });
+      };
+      tr.addEventListener('click', act);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') act(); });
+    });
+  }
+
   // ---------- Events ----------
   function setFilter(key, value) {
     state.filters[key] = value;
@@ -497,11 +583,23 @@
     $('f-from').value = state.from || '';
     $('f-to').value = state.to || '';
     document.querySelectorAll('.custom-range').forEach((el) => { el.hidden = state.range !== 'custom'; });
+    document.querySelectorAll('.tab').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
+    $('j-steps').addEventListener('change', (e) => { state.journey.steps = Number(e.target.value); state.journey.focus = []; writeHash(); renderJourney(); });
+    $('j-per').addEventListener('change', (e) => { state.journey.per = Number(e.target.value); state.journey.focus = []; writeHash(); renderJourney(); });
+    let resizeTimer;
+    window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.tab === 'journey' && state.data) renderJourney(); }, 150); });
+    $('journey').addEventListener('pointerenter', () => { journeyHover = true; });
+    $('journey').addEventListener('pointerleave', () => {
+      journeyHover = false;
+      if (journeyStale) { journeyStale = false; renderJourney(); }
+    });
+    setTab(state.tab);
     await loadOrgs();
     $('f-org').addEventListener('change', (e) => {
       // AVAs and intents differ between orgs, so start the new org unfiltered.
       state.org = e.target.value;
       for (const k of Object.keys(state.filters)) state.filters[k] = '';
+      state.journey.focus = [];
       state.detailCache.clear();
       state.page = 1;
       load();
@@ -530,6 +628,7 @@
     });
     $('f-reset').addEventListener('click', () => {
       for (const k of Object.keys(state.filters)) state.filters[k] = '';
+      state.journey.focus = [];
       state.page = 1;
       render();
     });

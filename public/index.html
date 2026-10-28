@@ -18,6 +18,11 @@
     </div>
   </header>
 
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Views">
+    <button type="button" class="tab" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button type="button" class="tab" role="tab" data-tab="journey" aria-selected="false">Journey Flows</button>
+  </nav>
+
   <section class="filters" aria-label="Filters">
     <label class="field" id="org-field"><span>Genesys org</span><select id="f-org"></select></label>
     <label class="field">
@@ -74,6 +79,7 @@
   <div class="banner progress" id="progress" hidden></div>
 
   <main id="main">
+  <div id="view-overview">
     <section class="kpis" id="kpis" aria-label="Key metrics"></section>
 
     <section class="grid two wide-left">
@@ -122,6 +128,38 @@
         <dt>Data window</dt><dd>Everything here comes from Genesys’s turn-level data, which it appears to keep for only about the last 10 days, so ranges further back come up empty.</dd>
       </dl>
     </section>
+  </div>
+
+  <div id="view-journey" hidden>
+    <section class="card">
+      <header class="card-head">
+        <h2>Intent journeys <span class="muted" id="journey-count"></span></h2>
+        <div class="card-actions">
+          <label class="field inline"><span>Steps</span>
+            <select id="j-steps"><option value="3">3</option><option value="4" selected>4</option><option value="5">5</option><option value="6">6</option></select>
+          </label>
+          <label class="field inline"><span>Intents per step</span>
+            <select id="j-per"><option value="5">5</option><option value="8" selected>8</option><option value="12">12</option><option value="20">20</option></select>
+          </label>
+        </div>
+      </header>
+      <div class="journey-focus" id="journey-focus" hidden></div>
+      <p class="muted small journey-hint">Each line is the share of all sessions with intents that took that step. Hover a node or line to trace its sessions through the graph; click it to focus on just those sessions.</p>
+      <div class="journey-wrap" id="journey"></div>
+    </section>
+    <section class="card">
+      <header class="card-head"><h2>Most common journeys</h2><span class="muted small">Select a row to focus the graph on it</span></header>
+      <div class="table-wrap"><table class="data" id="journey-paths"></table></div>
+    </section>
+    <section class="card definitions">
+      <h2>How the journeys are built</h2>
+      <dl>
+        <dt>Path</dt><dd>Every session where Claude found at least one intent runs from Start through its intents, in the order the customer raised them, to its outcome: valid response to all intents, not valid to all, or customer left first. The same intent at a different step is a separate node, so the graph shows what customers ask for first, second and so on.</dd>
+        <dt>Percentages</dt><dd>Share of all sessions with intents under the current filters. When the graph is focused, the tooltips also give the share of the focused sessions.</dd>
+        <dt>Folding</dt><dd>Intents beyond the chosen number of steps fold into “More intents”. At each step, intents outside the most common ones fold into “Other intents”; raise “Intents per step” to see them. The six most common intents keep the same color everywhere; the rest are gray.</dd>
+      </dl>
+    </section>
+  </div>
   </main>
 
   <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
@@ -140,6 +178,7 @@
   </aside>
 
   <script src="metrics.js"></script>
+  <script src="journey.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

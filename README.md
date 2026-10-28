@@ -11,7 +11,9 @@ Reporting for Genesys Cloud Agentic Virtual Agents (AVAs). This is dashboard v2:
 - **AVAs**: the same per AVA (all versions together), with tool calls, tool failures and guardrail blocks.
 - **AVA sessions**: sortable, searchable by conversation ID, exportable to CSV. Each row shows the intents in the order raised, colored by verdict (hover for Claude's reason), and whether every intent got a valid response. Selecting a session opens each intent with its verdict and reason, and the AVA-only transcript with tool calls, guardrail events and reply times.
 
-The definitions behind each number are at the bottom of the page.
+These are on the **Overview** tab. The definitions behind each number are at the bottom of the page.
+
+**Journey Flows** (second tab) draws every session's intents as a flow graph: from Start, through the first, second, third intent and so on in the order the customer raised them, to the session's outcome (valid to all intents, not valid to all, or customer left first). Node and line thickness is the number of sessions, and each node shows its share of all sessions with intents. Hover a node or line to trace its sessions through the rest of the graph and see counts in a tooltip. Click it to focus the graph on just those sessions; it re-lays itself out, and focuses can be stacked or removed. Steps beyond the chosen number fold into "More intents", and less common intents at each step fold into "Other intents". Below the graph, the most common full journeys are listed with their share and valid-to-all rate; selecting one focuses the graph on it. The same filters apply to both tabs.
 
 ### Where the intents and verdicts come from
 
