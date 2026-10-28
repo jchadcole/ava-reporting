@@ -31,7 +31,7 @@ const CACHE_FILE = process.env.AVA_CACHE_FILE || path.join(__dirname, '..', 'dat
 const MAX_TRANSCRIPT_CHARS = 40_000;
 const MAX_KNOWN_INTENTS = 60;
 // Bump when the verdicts or instructions change, so saved analyses are redone.
-const PROMPT_VERSION = 2; // 2 added supported, resolved, transfer reason and misunderstandings
+const PROMPT_VERSION = 3; // 2 added supported, resolved, transfer reason, misunderstandings; 3 last AVA state, silence
 
 // Third-party bots report ids like "agent_operator?instance_name=..."; show the part before the query.
 function displayBotName(id, name) {
@@ -88,6 +88,7 @@ function summarizeAvaSession(sessionId, turns, bot) {
     issues,
     agentRequested,
     endReason: end ? `${end.type}: ${end.reason}` : null,
+    lastResult: last.askActionResult || null,
     responseTimesMs,
   };
 }
@@ -124,7 +125,18 @@ function summarizeHandoff(c) {
   let queueAt = null;
   let agentAt = null;
   let queueName = null;
+  let customerDisconnect = null;
+  let customerEnd = null;
   for (const p of c.participants || []) {
+    // How the customer's side ended: client/endpoint is the customer hanging up or closing the chat.
+    if (p.purpose === 'customer' || p.purpose === 'external') {
+      for (const sess of p.sessions || []) for (const seg of sess.segments || []) {
+        if (seg.disconnectType && (!customerEnd || (seg.segmentEnd || '') >= customerEnd)) {
+          customerDisconnect = seg.disconnectType;
+          customerEnd = seg.segmentEnd || customerEnd;
+        }
+      }
+    }
     if (p.purpose !== 'acd' && p.purpose !== 'agent') continue;
     for (const sess of p.sessions || []) {
       for (const seg of sess.segments || []) {
@@ -136,7 +148,7 @@ function summarizeHandoff(c) {
       }
     }
   }
-  return { queueAt, agentAt, queueName };
+  return { queueAt, agentAt, queueName, customerDisconnect };
 }
 
 async function fetchHandoffs(request, startMs, endMs) {
@@ -178,7 +190,23 @@ function applyHandoff(s, h) {
   }
   s.transferred = s.handoff == null ? null : s.handoff !== 'none';
   s.endedNormally = s.transferred === false && !/Error|RecognitionFailure/i.test(s.endReason || '');
+  s.exitType = exitType(s, h);
   return s;
+}
+
+// SessionExitType for abandon tracking: natural_completion, user_hangup, timeout, or transfer;
+// null when Genesys doesn't say. Genesys has no signal for a channel switch, so that is never set.
+function exitType(s, h) {
+  if (s.transferred) return 'transfer';
+  const end = s.endReason || '';
+  if (/NoInput/i.test(end)) return 'timeout';
+  if (/TriggeredByUser/i.test(end)) return 'user_hangup';
+  const d = h?.customerDisconnect;
+  if (d === 'client' || d === 'endpoint') return 'user_hangup';
+  if (d === 'timeout') return 'timeout';
+  if (s.lastResult === 'NoInputCollection') return 'timeout'; // the customer went quiet on the AVA's last prompt
+  if (d === 'peer' || d === 'system' || /TriggeredByFlow|Disconnect/i.test(end)) return 'natural_completion';
+  return null;
 }
 
 // ---------- Transcript for Claude ----------
@@ -246,9 +274,11 @@ const SCHEMA = {
       },
     },
     transferReason: { type: 'string', enum: TRANSFER_REASONS.map((r) => r.key), description: 'Why the customer was handed to a person, or none if they were not.' },
+    lastBotState: { type: 'string', enum: ['prompting_input', 'providing_answer', 'fallback_prompt', 'error_message'], description: "What the AVA's last message was doing: asking for input, giving an answer, a fallback such as \"I didn't understand\" or \"I can't help with that\", or an error message." },
+    midSessionSilence: { type: 'boolean', description: 'True if the customer stopped responding right after the AVA failed or fell back.' },
     misunderstandings: { type: 'integer', description: 'How many times the AVA failed to understand the customer (asked them to repeat, answered the wrong thing, or fell back to a generic reply).' },
   },
-  required: ['intents', 'transferReason', 'misunderstandings'],
+  required: ['intents', 'transferReason', 'misunderstandings', 'lastBotState', 'midSessionSilence'],
   additionalProperties: false,
 };
 
@@ -263,7 +293,7 @@ Also judge, for each intent, whether it is supported (within what this AVA is de
 
 For the session, give the transfer reason if the customer was handed to a person (you are told whether Genesys shows a hand-off):
 ${TRANSFER_REASONS.filter((r) => r.description).map((r) => `- ${r.key}: ${r.description}`).join('\n')}
-Use none if there was no hand-off. Also count the times the AVA failed to understand the customer.
+Use none if there was no hand-off. Also count the times the AVA failed to understand the customer, say what the AVA's last message was doing, and whether the customer went silent right after the AVA failed or fell back.
 
 Lines in [brackets] are signals Genesys recorded for that turn (tool calls and their status, guardrail blocks, errors, the customer saying nothing). A guardrail block is valid when the AVA was right to refuse. Base every judgment only on the transcript; you cannot see tool results beyond what the AVA said. Card numbers, PINs and similar values are masked with •.`;
 
@@ -335,6 +365,8 @@ async function analyzeOne({ orgKey, session, turns }) {
     intents: refused ? [] : data.intents.filter((i) => i.name?.trim() && VERDICTS.some((v) => v.key === i.verdict)),
     transferReason: refused ? null : TRANSFER_REASONS.some((r) => r.key === data.transferReason) ? data.transferReason : null,
     misunderstandings: refused ? null : Number.isInteger(data.misunderstandings) ? data.misunderstandings : null,
+    lastBotState: refused ? null : data.lastBotState || null,
+    midSessionSilence: refused ? null : typeof data.midSessionSilence === 'boolean' ? data.midSessionSilence : null,
     refused,
     model,
     turns: session.turns,
@@ -444,7 +476,7 @@ function avaResponse(orgKey, build) {
     const a = savedAnalysis(orgKey, s);
     if (a) analyzed++;
     if (isCurrent(a)) current++;
-    const analysis = a ? { intents: a.intents, refused: a.refused || false, ...(isCurrent(a) ? { transferReason: a.transferReason, misunderstandings: a.misunderstandings } : { outdated: true }) } : null;
+    const analysis = a ? { intents: a.intents, refused: a.refused || false, ...(isCurrent(a) ? { transferReason: a.transferReason, misunderstandings: a.misunderstandings, lastBotState: a.lastBotState, midSessionSilence: a.midSessionSilence } : { outdated: true }) } : null;
     return { ...s, analysis, pending: pending.has(s.id) };
   });
   return {

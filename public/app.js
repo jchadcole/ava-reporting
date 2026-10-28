@@ -24,7 +24,7 @@
     return `${h}h ${String(m % 60).padStart(2, '0')}m`;
   }
 
-  const FILTER_IDS = { agent: 'f-agent', media: 'f-media', intent: 'f-intent', verdict: 'f-verdict', intentVerdict: 'f-intentverdict', issues: 'f-issues', preview: 'f-preview', containment: 'f-containment' };
+  const FILTER_IDS = { agent: 'f-agent', media: 'f-media', intent: 'f-intent', verdict: 'f-verdict', intentVerdict: 'f-intentverdict', issues: 'f-issues', preview: 'f-preview', containment: 'f-containment', abandon: 'f-abandon' };
   const ISSUE_LABEL = { error: 'Error', guardrail: 'Guardrail block', tool_failed: 'Tool failed', no_reply: 'No reply' };
 
   const state = {
@@ -33,7 +33,7 @@
     range: '7',
     from: null,
     to: null,
-    filters: { agent: '', media: '', intent: '', verdict: '', intentVerdict: '', issues: '', preview: '', containment: '', search: '' },
+    filters: { agent: '', media: '', intent: '', verdict: '', intentVerdict: '', issues: '', preview: '', containment: '', abandon: '', search: '' },
     data: null,
     filtered: [],
     page: 1,
@@ -235,6 +235,10 @@
         const c = M.containmentSummary(state.filtered);
         return { label: 'Contained', value: pct(c.rate, 1), meter: c.rate, sub: c.scored ? `${num(c.contained)} of ${num(c.scored)} sessions with intents` : 'Waiting for Claude’s analysis' };
       })(),
+      (() => {
+        const c = M.abandonmentSummary(state.filtered);
+        return { label: 'Abandoned', value: pct(c.rate, 1), meter: c.rate, sub: c.scored ? `${num(c.abandoned)} of ${num(c.scored)} sessions with intents` : 'Waiting for Claude’s analysis' };
+      })(),
       { label: 'Valid response to all intents', value: pct(s.allValidRate, 1), meter: s.allValidRate, sub: s.scored ? `${num(s.allValid)} of ${num(s.scored)} sessions` : 'No analyzed sessions yet' },
       { label: 'Intents with a valid response', value: pct(s.validIntentRate, 1), meter: s.validIntentRate, sub: `${num(s.intentVerdicts.valid)} of ${num(s.judgedIntents)} intents` },
       { label: 'Intents detected', value: num(s.intents), sub: s.intentsPerSession != null ? `${num(s.intentsPerSession, 1)} per session · ${num(s.multiIntent)} with more than one` : '–' },
@@ -263,25 +267,33 @@
     renderShowMore('intents', rows.length);
   }
 
-  // Contained and not-contained sessions by the rule that decided them, plus transfer reasons.
-  function renderContainment() {
-    const c = M.containmentSummary(state.filtered);
-    const el = $('containment');
-    if (!c.scored) {
-      el.innerHTML = `<div class="empty-state">${state.data.analysis.enabled ? 'Containment appears as Claude finishes analyzing sessions with the containment fields.' : 'Containment needs Claude analysis.'}</div>`;
-    } else {
-      const max = Math.max(...c.rows.map((r) => r.count), 1);
-      el.innerHTML = c.rows.map((r) => `<div class="bar-row${state.filters.containment === (r.contained ? 'contained' : 'not_contained') ? ' active' : ''}" data-key="${r.contained ? 'contained' : 'not_contained'}" tabindex="0" role="button">
-          <span class="bar-label">${r.contained ? '✓' : '✕'} ${esc(r.label)}</span>
-          <span class="bar-value">${num(r.count)} · ${pct(r.count / c.scored)}</span>
-          <div class="bar-track"><div class="bar-fill ${r.contained ? 'v-bg-valid' : 'v-bg-not_valid'}" style="width:${((r.count / max) * 100).toFixed(1)}%"></div></div>
-        </div>`).join('');
-      el.querySelectorAll('.bar-row').forEach((row) => {
-        const toggle = () => setFilter('containment', state.filters.containment === row.dataset.key ? '' : row.dataset.key);
-        row.addEventListener('click', toggle);
-        row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
-      });
+  // Sessions by the rule that decided them; `good` rows are drawn green, the rest red.
+  function renderRuleBars(id, summary, filterKey, rowKey, good) {
+    const el = $(id);
+    if (!summary.scored) {
+      el.innerHTML = `<div class="empty-state">${state.data.analysis.enabled ? 'Appears as Claude finishes analyzing sessions with the newest fields.' : 'Needs Claude analysis.'}</div>`;
+      return;
     }
+    const max = Math.max(...summary.rows.map((r) => r.count), 1);
+    el.innerHTML = summary.rows.map((r) => {
+      const key = rowKey(r);
+      return `<div class="bar-row${state.filters[filterKey] === key ? ' active' : ''}" data-key="${key}" tabindex="0" role="button">
+          <span class="bar-label">${good(r) ? '✓' : '✕'} ${esc(r.label)}</span>
+          <span class="bar-value">${num(r.count)} · ${pct(r.count / summary.scored)}</span>
+          <div class="bar-track"><div class="bar-fill ${good(r) ? 'v-bg-valid' : 'v-bg-not_valid'}" style="width:${((r.count / max) * 100).toFixed(1)}%"></div></div>
+        </div>`;
+    }).join('');
+    el.querySelectorAll('.bar-row').forEach((row) => {
+      const toggle = () => setFilter(filterKey, state.filters[filterKey] === row.dataset.key ? '' : row.dataset.key);
+      row.addEventListener('click', toggle);
+      row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+    });
+  }
+
+  // Containment and abandons by the rule that decided them, plus why transferred sessions went to a person.
+  function renderContainment() {
+    renderRuleBars('containment', M.containmentSummary(state.filtered), 'containment', (r) => (r.contained ? 'contained' : 'not_contained'), (r) => r.contained);
+    renderRuleBars('abandons', M.abandonmentSummary(state.filtered), 'abandon', (r) => (r.abandoned ? 'abandoned' : 'not_abandoned'), (r) => !r.abandoned);
     const reasons = new Map();
     for (const s of state.filtered) {
       const r = s.analysis?.transferReason;
@@ -301,6 +313,12 @@
     const c = M.containment(s);
     if (!c.status) return '<span class="muted">–</span>';
     return `<span class="badge ${c.status === 'contained' ? 'yes' : 'no'}" title="${esc(c.reason)}">${c.status === 'contained' ? 'Contained' : 'Not contained'}</span>`;
+  }
+
+  function abandonBadge(s) {
+    const c = M.abandonment(s);
+    if (!c.status) return '<span class="muted">–</span>';
+    return `<span class="badge ${c.status === 'abandoned' ? 'no' : 'yes'}" title="${esc(c.reason)}">${c.status === 'abandoned' ? 'Abandoned' : 'Not abandoned'}</span>`;
   }
 
   function renderVerdicts(t) {
@@ -354,7 +372,7 @@
     { key: 'media', label: 'Channel', value: (s) => s.media || '' },
     { key: 'intents', label: 'Intents detected', value: (s) => M.intents(s).map((i) => i.name).join(' > ') },
     { key: 'verdict', label: 'Valid response to all?', value: (s) => VERDICT_ORDER.indexOf(M.sessionVerdict(s)), num: true },
-    { key: 'containment', label: 'Containment', value: (s) => ({ contained: 0, not_contained: 1 })[M.containment(s).status] ?? 2, num: true },
+    { key: 'containment', label: 'Containment / abandon', value: (s) => ({ contained: 0, not_contained: 1 })[M.containment(s).status] ?? 2, num: true },
     { key: 'customerTurns', label: 'Customer turns', value: (s) => s.customerTurns, num: true },
     { key: 'toolCalls', label: 'Tools', value: (s) => s.toolCalls, num: true },
     { key: 'issues', label: 'Genesys flags', value: (s) => M.issueCount(s), num: true },
@@ -403,7 +421,7 @@
         <td>${esc(s.media || '')}</td>
         <td>${intentChips(s)}</td>
         <td class="num">${verdictBadge(s)}</td>
-        <td class="num">${containmentBadge(s)}</td>
+        <td class="num">${containmentBadge(s)}<div>${M.abandonment(s).status === 'abandoned' ? abandonBadge(s) : ''}</div></td>
         <td class="num">${num(s.customerTurns)}</td>
         <td class="num">${num(s.toolCalls)}</td>
         <td class="num">${M.issueCount(s) ? `<span class="v-not_valid" title="${esc(issuesText(s))}">${num(M.issueCount(s))}</span>` : '<span class="muted">0</span>'}</td></tr>`).join('')
@@ -433,12 +451,12 @@
 
   function exportCsv() {
     const rows = sortedSessions();
-    const header = ['Started', 'AVA', 'AVA versions', 'Bot flow', 'Channel', 'Intents (in order)', 'Intent verdicts', 'Valid response to all intents', 'Containment', 'Containment rule', 'Transferred (Genesys)', 'Transfer reason', 'Misunderstandings', 'Customer turns', 'Tool calls', 'Genesys flags', 'Conversation ID', 'Bot session ID', 'Preview'];
+    const header = ['Started', 'AVA', 'AVA versions', 'Bot flow', 'Channel', 'Intents (in order)', 'Intent verdicts', 'Valid response to all intents', 'Containment', 'Containment rule', 'Abandoned', 'Abandon rule', 'Exit type (Genesys)', 'Last AVA state (Claude)', 'Silent after a failure (Claude)', 'Transferred (Genesys)', 'Transfer reason', 'Misunderstandings', 'Customer turns', 'Tool calls', 'Genesys flags', 'Conversation ID', 'Bot session ID', 'Preview'];
     const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const lines = [header.map(cell).join(',')].concat(rows.map((s) => [
       s.start, s.agentName, (s.agents || []).map((a) => a.version).join(' '), s.botName, s.media,
       M.intents(s).map((i) => i.name).join(' > '), M.intents(s).map((i) => `${i.name}: ${verdictLabel(i.verdict)}`).join('; '),
-      M.SESSION_VERDICT_LABEL[M.sessionVerdict(s)], M.containment(s).status || '', M.containment(s).reason || '', s.transferred == null ? '' : s.transferred ? 'yes' : 'no', s.analysis?.transferReason || '', s.analysis?.misunderstandings ?? '', s.customerTurns, s.toolCalls, issuesText(s), s.conversationId, s.id, s.preview ? 'yes' : 'no',
+      M.SESSION_VERDICT_LABEL[M.sessionVerdict(s)], M.containment(s).status || '', M.containment(s).reason || '', M.abandonment(s).status || '', M.abandonment(s).reason || '', M.EXIT_LABEL[s.exitType] || '', s.analysis?.lastBotState || '', s.analysis?.midSessionSilence == null ? '' : s.analysis.midSessionSilence ? 'yes' : 'no', s.transferred == null ? '' : s.transferred ? 'yes' : 'no', s.analysis?.transferReason || '', s.analysis?.misunderstandings ?? '', s.customerTurns, s.toolCalls, issuesText(s), s.conversationId, s.id, s.preview ? 'yes' : 'no',
     ].map(cell).join(',')));
     const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
@@ -492,6 +510,10 @@
     const facts = [
       ['Valid response to all intents', verdictBadge(s)],
       ['Containment', M.containment(s).status ? `${containmentBadge(s)}<div class="cell-sub">${esc(M.containment(s).reason)}</div>` : '–'],
+      ['Abandoned', M.abandonment(s).status ? `${abandonBadge(s)}<div class="cell-sub">${esc(M.abandonment(s).reason)}</div>` : '–'],
+      ['How the session ended (Genesys)', esc(M.EXIT_LABEL[s.exitType] || 'Unknown')],
+      ['Last AVA message (Claude)', esc(({ prompting_input: 'Asking for input', providing_answer: 'Giving an answer', fallback_prompt: 'Fallback', error_message: 'Error message' })[s.lastResult === 'Error' ? 'error_message' : s.analysis?.lastBotState] || '–')],
+      ['Silent after a failure (Claude)', s.analysis?.midSessionSilence == null ? '–' : s.analysis.midSessionSilence ? 'Yes' : 'No'],
       ['Transferred to a person', s.transferred == null ? 'Unknown' : s.transferred ? esc(`Yes${s.handoff === 'agent' ? ', reached an agent' : s.handoff === 'queue' ? ', sent to a queue' : ''}${s.queueName ? ` (${s.queueName})` : ''}`) : 'No'],
       ['Transfer reason (Claude)', esc(state.data.transferReasons.find((r) => r.key === s.analysis?.transferReason)?.label || '–')],
       ['Misunderstandings (Claude)', num(s.analysis?.misunderstandings ?? null)],

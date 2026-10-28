@@ -131,3 +131,18 @@ test('containment follows the three rules and the exclusions', () => {
   const sum = M.containmentSummary([s([i(true, true)]), s([i(true, false)]), session({})]);
   assert.deepEqual([sum.contained, sum.scored, sum.rate], [1, 2, 0.5]);
 });
+
+test('abandonment follows the three rules and the exclusions', () => {
+  const i = (supported, resolved) => ({ name: 'x', supported, resolved, verdict: resolved ? 'valid' : 'not_valid' });
+  const s = (intentsList, over = {}, a = {}) => session({ transferred: false, exitType: 'user_hangup', customerTurns: 2, ...over, analysis: { intents: intentsList, transferReason: 'none', misunderstandings: 0, lastBotState: 'providing_answer', midSessionSilence: false, ...a } });
+  const rule = (x) => M.abandonment(x).rule;
+  assert.equal(rule(s([i(true, false)], {}, { misunderstandings: 2 })), 'frustration');
+  assert.equal(rule(s([i(false, false)], { exitType: 'timeout' }, { lastBotState: 'fallback_prompt' })), 'dead_end');
+  assert.equal(rule(s([i(true, false)], { customerTurns: 3 })), 'premature');
+  assert.equal(rule(s([i(true, false)], { customerTurns: 3, exitType: 'timeout' })), 'other'); // premature needs a hang-up
+  assert.equal(rule(s([i(true, false)], { transferred: true }, { misunderstandings: 3 })), 'escalation');
+  assert.equal(rule(s([i(true, false), i(true, true)], {}, { misunderstandings: 3 })), 'deflection');
+  assert.equal(M.abandonment(s([i(true, true)], {}, { lastBotState: undefined })).status, null); // analyzed before these fields
+  const sum = M.abandonmentSummary([s([i(true, false)], { customerTurns: 4 }), s([i(true, true)])]);
+  assert.deepEqual([sum.abandoned, sum.scored, sum.rate], [1, 2, 0.5]);
+});

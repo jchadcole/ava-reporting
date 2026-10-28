@@ -66,6 +66,14 @@
         <option value="unscored">Not scored yet</option>
       </select>
     </label>
+    <label class="field"><span>Abandoned</span>
+      <select id="f-abandon">
+        <option value="">Any</option>
+        <option value="abandoned">Abandoned</option>
+        <option value="not_abandoned">Not abandoned</option>
+        <option value="unscored">Not scored yet</option>
+      </select>
+    </label>
     <label class="field"><span>Genesys flags</span>
       <select id="f-issues">
         <option value="">Any</option>
@@ -90,10 +98,14 @@
   <div id="view-overview">
     <section class="kpis" id="kpis" aria-label="Key metrics"></section>
 
-    <section class="grid two">
+    <section class="grid three">
       <article class="card">
         <header class="card-head"><h2>Containment</h2><span class="muted small">Select a row to filter</span></header>
         <div id="containment" class="bar-list"></div>
+      </article>
+      <article class="card">
+        <header class="card-head"><h2>Abandons</h2><span class="muted small">Select a row to filter</span></header>
+        <div id="abandons" class="bar-list"></div>
       </article>
       <article class="card">
         <header class="card-head"><h2>Why sessions were transferred</h2></header>
@@ -150,6 +162,14 @@
           </ul>
           Never contained: a supported intent the AVA had a chance to answer but did not resolve, or a transfer caused by an error or by more than two misunderstandings.
           <br>Where each input comes from. <b>Genesys</b>: transferred (the conversation reached a queue or an agent after the AVA started, or the AVA ended with a transfer) and ended normally (no transfer, no error ending). <b>Claude</b>, inferred from the transcript: whether each intent is supported and resolved, the transfer reason (unsupported intent, customer frustration, system error, customer preference) and the number of misunderstandings. Sessions analyzed before these fields existed show no containment until Claude re-reads them.</dd>
+        <dt>Abandoned</dt><dd>A session with at least one intent is abandoned when it meets one of three rules, and neither exclusion applies.
+          <ul>
+            <li><b>Frustration abandon</b>: no transfer, the customer hung up or went quiet, and the AVA misunderstood them at least twice.</li>
+            <li><b>Dead-end abandon</b>: no transfer, the customer hung up or went quiet, an intent was unsupported, and the AVA’s last message was a fallback.</li>
+            <li><b>Premature drop-off</b>: no transfer, the customer hung up after at least three turns, and no intent was resolved.</li>
+          </ul>
+          Never abandoned: a transfer to a person (an escalation), or a session where the last supported intent was resolved before the customer left (a deflection).
+          <br>Where each input comes from. <b>Genesys</b>: how the session ended (the AVA’s end reason and how the customer’s side disconnected: hung up or left, timed out, natural completion; Genesys has no signal for a channel switch) and the number of customer turns. <b>Claude</b>, inferred from the transcript: what the AVA’s last message was doing (an error result Genesys records overrides it), whether the customer went silent after a failure, plus the containment inputs above.</dd>
         <dt>Genesys flags</dt><dd>What Genesys itself recorded on the AVA’s turns, with no AI judgment: an error result, a guardrail that blocked a reply, a tool call that did not succeed, or customer input that got no reply. A flag doesn’t always mean a bad response (a guardrail can rightly block a request), and a response can be wrong without any flag, which is why the verdicts come from reading the transcript.</dd>
         <dt>AVA reply time</dt><dd>For each customer turn, the time from when Genesys captured the customer’s input until the AVA had its reply ready.</dd>
         <dt>Data window</dt><dd>Everything here comes from Genesys’s turn-level data, which it appears to keep for only about the last 10 days, so ranges further back come up empty.</dd>

@@ -79,7 +79,7 @@ test('transfers come from Genesys conversation detail after the AVA started', ()
     { purpose: 'acd', participantName: 'Licensing', sessions: [{ segments: [{ segmentStart: '2026-10-20T10:05:00Z' }] }] },
     { purpose: 'agent', sessions: [{ segments: [{ segmentType: 'alert', segmentStart: '2026-10-20T10:06:00Z' }, { segmentType: 'interact', segmentStart: '2026-10-20T10:06:10Z' }] }] },
   ] });
-  assert.deepEqual(conv, { queueAt: '2026-10-20T10:05:00Z', agentAt: '2026-10-20T10:06:10Z', queueName: 'Licensing' });
+  assert.deepEqual(conv, { queueAt: '2026-10-20T10:05:00Z', agentAt: '2026-10-20T10:06:10Z', queueName: 'Licensing', customerDisconnect: null });
   const s = ava.applyHandoff(base(), conv);
   assert.deepEqual([s.handoff, s.transferred, s.endedNormally, s.queueName], ['agent', true, false, 'Licensing']);
   // A queue visit before the AVA started doesn't count.
@@ -88,4 +88,16 @@ test('transfers come from Genesys conversation detail after the AVA started', ()
   assert.equal(ava.applyHandoff(base(), undefined).transferred, null);
   assert.equal(ava.applyHandoff({ ...base(), endReason: 'Exit: AgentRequestedByUser' }, undefined).transferred, true);
   assert.equal(ava.applyHandoff({ ...base(), endReason: 'Exit: Error' }, { queueAt: null, agentAt: null }).endedNormally, false);
+});
+
+test('the exit type comes from the AVA ending and how the customer disconnected', () => {
+  const s = (over, h) => ava.applyHandoff({ start: '2026-10-20T10:00:00Z', endReason: null, lastResult: 'SuccessCollection', ...over }, h);
+  const none = { queueAt: null, agentAt: null };
+  assert.equal(s({}, { ...none, customerDisconnect: 'client' }).exitType, 'user_hangup');
+  assert.equal(s({ endReason: 'Disconnect: RecognitionFailure.MaxNoInputs.Collection' }, none).exitType, 'timeout');
+  assert.equal(s({ lastResult: 'NoInputCollection' }, none).exitType, 'timeout');
+  assert.equal(s({ endReason: 'Exit: TriggeredByFlow' }, { ...none, customerDisconnect: 'peer' }).exitType, 'natural_completion');
+  assert.equal(s({}, { queueAt: '2026-10-20T10:05:00Z', agentAt: null, customerDisconnect: 'client' }).exitType, 'transfer');
+  assert.equal(s({}, none).exitType, null);
+  assert.equal(ava.summarizeHandoff({ participants: [{ purpose: 'customer', sessions: [{ segments: [{ segmentEnd: '2026-10-20T10:01:00Z', disconnectType: 'endpoint' }] }] }] }).customerDisconnect, 'endpoint');
 });

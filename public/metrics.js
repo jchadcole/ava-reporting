@@ -52,6 +52,7 @@
       if (f.verdict && sessionVerdict(s) !== f.verdict) return false;
       if (f.intentVerdict && !intents(s).some((i) => i.verdict === f.intentVerdict && (!f.intent || i.name === f.intent))) return false;
       if (f.containment && (f.containment === 'unscored' ? containment(s).status !== null : containment(s).status !== f.containment)) return false;
+      if (f.abandon && (f.abandon === 'unscored' ? abandonment(s).status !== null : abandonment(s).status !== f.abandon)) return false;
       if (f.issues === 'yes' && !issueCount(s)) return false;
       if (f.issues === 'no' && issueCount(s)) return false;
       if (q && !`${s.conversationId || ''} ${s.id}`.toLowerCase().includes(q)) return false;
@@ -233,6 +234,65 @@
     return { contained, scored, rate: ratio(contained, scored), rows };
   }
 
+  // ---------- Abandons ----------
+  // Chad's abandon rules (2026-10-28), on top of the containment inputs:
+  //   SessionExitType: Genesys (AVA end reason, the customer's disconnect type, a final no-input)
+  //   LastBotState: Claude, except an error result on the last AVA turn is error_message (Genesys)
+  //   UserUtteranceCount: Genesys, customer turns in the AVA
+  //   MidSessionSilence: Claude (shown, not used by the rules)
+  const ABANDON_RULES = {
+    frustration: 'Frustration abandon',
+    dead_end: 'Dead-end abandon',
+    premature: 'Premature drop-off',
+  };
+  const NOT_ABANDONED = {
+    escalation: 'Transferred to a person (escalation)',
+    deflection: 'Resolved, then left (deflection)',
+    other: 'Other ending',
+  };
+  const EXIT_LABEL = { natural_completion: 'Natural completion', user_hangup: 'Customer hung up or left', timeout: 'Timed out', transfer: 'Transferred', channel_switch: 'Switched channel' };
+
+  function abandonment(s) {
+    const a = s.analysis;
+    const list = intents(s);
+    if (!a || a.outdated || a.refused || !list.length || !a.lastBotState) return { status: null };
+    const transferred = s.transferred ?? (a.transferReason ? a.transferReason !== 'none' : null);
+    const exit = s.exitType;
+    const lastState = s.lastResult === 'Error' ? 'error_message' : a.lastBotState;
+    const loops = a.misunderstandings || 0;
+    const yes = (key) => ({ status: 'abandoned', rule: key, reason: ABANDON_RULES[key] });
+    const no = (key) => ({ status: 'not_abandoned', rule: key, reason: NOT_ABANDONED[key] });
+    // Exclusions: a transfer is an escalation; a resolved final supported intent followed by the
+    // customer leaving is a deflection.
+    if (transferred) return no('escalation');
+    const supported = list.filter((i) => i.supported);
+    const lastSupported = supported[supported.length - 1];
+    if (lastSupported?.resolved && (exit === 'user_hangup' || exit === 'natural_completion' || exit === 'timeout')) return no('deflection');
+    const leftEarly = exit === 'user_hangup' || exit === 'timeout';
+    if (leftEarly && loops >= 2) return yes('frustration');
+    if (leftEarly && list.some((i) => !i.supported) && lastState === 'fallback_prompt') return yes('dead_end');
+    if (exit === 'user_hangup' && (s.customerTurns || 0) >= 3 && list.every((i) => !i.resolved)) return yes('premature');
+    return no('other');
+  }
+
+  function abandonmentSummary(sessions) {
+    const counts = {};
+    let abandoned = 0;
+    let scored = 0;
+    for (const s of sessions) {
+      const c = abandonment(s);
+      if (!c.status) continue;
+      scored++;
+      if (c.status === 'abandoned') abandoned++;
+      counts[c.rule] = (counts[c.rule] || 0) + 1;
+    }
+    const rows = [
+      ...Object.entries(ABANDON_RULES).map(([key, label]) => ({ key, label, abandoned: true, count: counts[key] || 0 })),
+      ...Object.entries(NOT_ABANDONED).map(([key, label]) => ({ key, label, abandoned: false, count: counts[key] || 0 })),
+    ];
+    return { abandoned, scored, rate: ratio(abandoned, scored), rows };
+  }
+
   // ---------- Journey flows ----------
   // Each session with intents becomes a path: Start → intent 1 → intent 2 → … → outcome.
   // Nodes are keyed by step and intent, so the same intent at step 1 and step 2 are separate
@@ -340,7 +400,7 @@
     return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
   }
 
-  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, localDay };
+  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, abandonment, abandonmentSummary, ABANDON_RULES, NOT_ABANDONED, EXIT_LABEL, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, localDay };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);
