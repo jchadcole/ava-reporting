@@ -13,6 +13,8 @@
     all_valid: 'var(--good)', not_all_valid: 'var(--critical)', customer_left: 'var(--series-unknown)',
     // Agent Escalation ends each path in the reason for the hand-off.
     unsupported_intent: 'var(--accent)', user_frustration: 'var(--critical)', system_error: 'var(--warning)', customer_preference: 'var(--text-2)', unknown: 'var(--series-unknown)',
+    // Agent Escalation, asked for a person: how the AVA answered the intent right before the request.
+    not_valid: 'var(--critical)', partial: 'var(--cat-4)', valid: 'var(--good)', no_chance: 'var(--series-unknown)',
   };
 
   const el = (name, attrs = {}) => {

@@ -345,3 +345,20 @@ span.v-not_valid { color: var(--critical); font-weight: 600; }
 .card.collapsed .card-head > :not(h2) { display: none; }
 .card.collapsed > h2 { margin-bottom: 0; }
 .card.collapsed { align-self: start; }
+
+/* Agent Escalation */
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin-bottom: 12px; background: var(--surface); }
+.seg button { font: inherit; font-size: 13px; padding: 6px 14px; border: 0; background: transparent; color: var(--text-2); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.mix { display: inline-flex; width: 120px; height: 10px; border-radius: 3px; overflow: hidden; background: var(--grid); vertical-align: middle; gap: 1px; }
+.mix span { display: block; height: 100%; }
+.mix-not_valid { background: var(--critical); }
+.mix-partial { background: var(--cat-4); }
+.mix-valid { background: var(--good); }
+.mix-no_chance { background: var(--series-unknown); }
+.why-summary { margin: 0 0 12px; line-height: 1.7; }
+.why-list { margin: 0; padding-left: 20px; display: grid; gap: 12px; }
+.why-list .intent-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.why-list .intent-head .btn { margin-left: auto; }
+#view-journey .card, #view-escalation .card, .journey-wrap { scroll-margin-top: 170px; }

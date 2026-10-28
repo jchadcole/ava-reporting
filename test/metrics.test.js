@@ -192,3 +192,39 @@ test('escalation: intents driving hand-offs, last intent before the hand-off and
   assert.deepEqual(g.nodes.filter((n) => n.kind === 'outcome').map((n) => n.label).sort(), ['Customer asked for a person', 'Customer frustration', 'Unsupported intent']);
   assert.equal(g.outcomeOrder[0], 'unsupported_intent');
 });
+
+test('asked for a person: intents before the request, how the AVA answered them', () => {
+  const it = (name, verdict, resolved = verdict === 'valid') => ({ name, verdict, resolved, why: `${name} ${verdict}`, customerAsked: name });
+  const sessions = [
+    { id: 'a', start: '2026-10-28T10:00:00Z', transferred: true, analysis: { intents: [it('Pay a fee', 'not_valid'), it('Speak to a person', 'valid'), it('Update address', 'valid')], transferReason: 'user_frustration' } },
+    { id: 'b', start: '2026-10-28T11:00:00Z', transferred: false, analysis: { intents: [it('Check claim status', 'valid'), it('Pay a fee', 'partial'), it('Talk to an agent', 'valid')] } },
+    { id: 'c', start: '2026-10-28T12:00:00Z', analysis: { intents: [it('Pay a fee', 'valid')] } },
+    { id: 'd', start: '2026-10-28T13:00:00Z', analysis: { intents: [it('Request a live agent', 'valid')] } },
+    { id: 'e', start: '2026-10-28T14:00:00Z', agentRequested: true, analysis: { intents: [it('Renew driver license', 'valid')] } },
+  ];
+  assert.equal(M.askedForPerson(sessions[2]), false);
+  assert.equal(M.askedForPerson(sessions[4]), true);
+  assert.deepEqual(M.namesBeforeRequest(sessions[0]), ['Pay a fee']);
+  assert.deepEqual(M.namesBeforeRequest(sessions[1]), ['Check claim status', 'Pay a fee']);
+  assert.deepEqual(M.namesBeforeRequest(sessions[3]), []);
+  assert.equal(M.requestOutcome(sessions[1]), 'partial');
+  const rows = M.requestIntentTable(sessions);
+  const fee = rows.find((r) => r.intent === 'Pay a fee');
+  assert.equal(rows[0].intent, 'Pay a fee');
+  assert.equal(fee.before, 2);
+  assert.equal(fee.rightBefore, 2);
+  assert.equal(fee.sessions, 3);
+  assert.deepEqual(fee.verdicts, { valid: 0, partial: 1, not_valid: 1, no_chance: 0 });
+  assert.equal(fee.notValidRate, 1);
+  assert.equal(fee.notes[0].verdict, 'not_valid');
+  assert.equal(rows.find((r) => r.intent === 'Update address'), undefined);
+  const sum = M.requestSummary(sessions);
+  assert.equal(sum.asked, 4);
+  assert.equal(sum.rightAway, 1);
+  assert.equal(sum.topLastIntent, 'Pay a fee');
+  assert.equal(sum.failed, 2);
+  assert.equal(sum.judged, 3);
+  const g = M.journeyGraph(sessions.filter(M.askedForPerson), { names: M.namesBeforeRequest, outcome: M.requestOutcome, outcomes: M.REQUEST_OUTCOMES });
+  assert.equal(g.total, 3);
+  assert.ok(!g.nodes.some((n) => /agent|person/i.test(n.label) && n.kind === 'intent'));
+});

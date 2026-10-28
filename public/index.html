@@ -211,10 +211,14 @@
   </div>
 
   <div id="view-escalation" hidden>
+    <div class="seg" id="esc-mode" role="group" aria-label="Sessions to show">
+      <button type="button" data-mode="request" aria-pressed="true">Asked for a person</button>
+      <button type="button" data-mode="escalated" aria-pressed="false">All escalations</button>
+    </div>
     <section class="kpis" id="esc-kpis" aria-label="Escalation metrics"></section>
     <section class="card">
       <header class="card-head">
-        <h2>Escalation journeys <span class="muted" id="esc-count"></span></h2>
+        <h2 id="esc-title">Escalation journeys <span class="muted" id="esc-count"></span></h2>
         <div class="card-actions">
           <label class="field inline"><span>Steps</span>
             <select id="esc-steps"><option value="3">3</option><option value="4" selected>4</option><option value="5">5</option><option value="6">6</option></select>
@@ -226,20 +230,30 @@
       </header>
       <div class="journey-intents" id="esc-intents"></div>
       <div class="journey-focus" id="esc-focus" hidden></div>
-      <p class="muted small journey-hint">Only sessions handed to a person after the AVA. Each path runs through the customer’s intents in order and ends in why the session escalated. Hover a node or line to trace its sessions; click it to focus on just those sessions.</p>
+      <p class="muted small journey-hint" id="esc-hint"></p>
       <div class="journey-wrap" id="escalation"></div>
     </section>
     <section class="card">
-      <header class="card-head"><h2>Intents driving escalations</h2><span class="muted small">Select a row to show only escalations with that intent</span></header>
+      <header class="card-head"><h2 id="esc-table-title">Intents driving escalations</h2><span class="muted small" id="esc-table-hint"></span></header>
       <div class="table-wrap"><table class="data" id="esc-intent-table"></table></div>
     </section>
+    <section class="card" id="esc-why" hidden>
+      <header class="card-head"><h2 id="esc-why-title">Why customers asked for a person</h2><span class="muted small">Claude’s note on the AVA’s answer to this intent in each session, worst answers first</span></header>
+      <div id="esc-why-body"></div>
+    </section>
     <section class="card">
-      <header class="card-head"><h2>Most common escalation journeys</h2><span class="muted small">Select a row to focus the graph on it</span></header>
+      <header class="card-head"><h2 id="esc-paths-title">Most common escalation journeys</h2><span class="muted small">Select a row to focus the graph on it</span></header>
       <div class="table-wrap"><table class="data" id="esc-paths"></table></div>
     </section>
     <section class="card definitions">
       <h2>How escalations are measured</h2>
-      <dl>
+      <dl data-esc-mode="request">
+        <dt>Asked for a person</dt><dd>Claude found an intent asking to speak to a person (an agent, representative or human), or Genesys recorded that the customer asked for an agent. Everything else the customer raised before that first request counts as an intent before the request. Customers who asked for a person straight away have no intents before it, so they are counted in the tiles but not drawn in the graph.</dd>
+        <dt>AVA answer before the request</dt><dd>Claude’s verdict on the intent raised right before the request: not valid, partial, valid (the customer asked for a person anyway), or the customer asked before the AVA could answer.</dd>
+        <dt>Request rate</dt><dd>Of all sessions in which Claude found the intent, the share where the customer went on to ask for a person. A high rate with many sessions is the best place to improve the AVA.</dd>
+        <dt>Not valid or partial, not resolved</dt><dd>For the sessions where the intent came before the request: how often the AVA’s answer to it was not valid or only partial, and how often Claude judged it not resolved. Select a row to read Claude’s note on each answer.</dd>
+      </dl>
+      <dl data-esc-mode="escalated" hidden>
         <dt>Escalated</dt><dd>Genesys shows the conversation going to a queue or an agent after the AVA started. “Reached an agent” means an agent picked it up; “Queue only” means it was queued but no agent interaction is recorded (for example, the customer left while waiting). When Genesys conversation detail is missing, Claude’s transfer reason stands in.</dd>
         <dt>Escalation reason</dt><dd>Claude’s reading of why the hand-off happened: an intent the AVA doesn’t support, customer frustration, a system error, or the customer simply asking for a person. “Reason not identified” is a hand-off Claude saw no reason for in the AVA transcript.</dd>
         <dt>Escalation rate</dt><dd>Of all sessions in which Claude found the intent, the share that escalated. A high rate with many sessions is the best place to improve the AVA.</dd>

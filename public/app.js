@@ -42,7 +42,7 @@
     expanded: { intents: false, agents: false },
     tab: 'overview',
     journey: { steps: 4, per: 8, focus: [], intents: [], match: 'any', allChips: false }, // focus: [{ id, label }] from clicks on the graph
-    escalation: { steps: 4, per: 8, focus: [], intents: [], match: 'any', allChips: false },
+    escalation: { mode: 'request', steps: 4, per: 8, focus: [], intents: [], match: 'any', allChips: false, allNotes: false },
   };
   const TABLE_PREVIEW_ROWS = 10;
   const verdictLabel = (key) => state.data?.verdicts.find((v) => v.key === key)?.label || key;
@@ -83,6 +83,7 @@
     if (Number(p.get('per'))) flow.per = Number(p.get('per'));
     if (p.get('jintents')) flow.intents = p.get('jintents').split('|');
     if (p.get('jmatch') === 'all') flow.match = 'all';
+    if (p.get('emode') === 'all') state.escalation.mode = 'escalated';
   }
   function writeHash() {
     const p = new URLSearchParams();
@@ -100,6 +101,7 @@
       p.set('per', flow.per);
       if (flow.intents.length) p.set('jintents', flow.intents.join('|'));
       if (flow.match === 'all') p.set('jmatch', 'all');
+      if (state.tab === 'escalation' && state.escalation.mode === 'escalated') p.set('emode', 'all');
     }
     history.replaceState(null, '', `#${p.toString()}`);
   }
@@ -607,8 +609,38 @@
         cells: (r) => rateCell(r.allValidRate),
       },
     },
-    escalation: {
-      ids: { graph: 'escalation', steps: 'esc-steps', per: 'esc-per', intents: 'esc-intents', focus: 'esc-focus', count: 'esc-count', paths: 'esc-paths' },
+    get escalation() { return ESC_MODES[state.escalation.mode] || ESC_MODES.request; },
+  };
+  const ESC_IDS = { graph: 'escalation', steps: 'esc-steps', per: 'esc-per', intents: 'esc-intents', focus: 'esc-focus', count: 'esc-count', paths: 'esc-paths' };
+  // Agent Escalation has two views: the intents customers raised before asking for a person
+  // (the default), and every session that was handed to a person.
+  const ESC_MODES = {
+    request: {
+      ids: ESC_IDS,
+      sessions: () => state.filtered.filter(M.askedForPerson),
+      names: M.namesBeforeRequest,
+      graphOpts: { names: M.namesBeforeRequest, outcome: M.requestOutcome, outcomes: M.REQUEST_OUTCOMES },
+      lastColumn: 'AVA answer before the request',
+      stepName: 'Before request',
+      startTitle: 'Sessions that asked for a person after other intents',
+      emptyText: 'No sessions in these filters asked for a person after raising another intent. Requests appear here once Claude has read the sessions.',
+      nodeExtra: (sub) => {
+        const failed = sub.filter((p) => p.outcome === 'not_valid' || p.outcome === 'partial').length;
+        const judged = sub.filter((p) => p.outcome !== 'no_chance').length;
+        return [['Asked right after a not valid or partial answer', judged ? `${pct(failed / judged)} of ${num(judged)}` : '–']];
+      },
+      pathCols: {
+        head: '<th class="num">Not valid or partial right before</th><th class="num">Escalated</th>',
+        cells: (r, list) => {
+          const judged = list.filter((s) => ['valid', 'partial', 'not_valid'].includes(M.requestOutcome(s)));
+          const failed = judged.filter((s) => M.requestOutcome(s) !== 'valid').length;
+          return `${rateCell(judged.length ? failed / judged.length : null)}${rateCell(list.length ? list.filter(M.isEscalated).length / list.length : null)}`;
+        },
+      },
+      before: () => { renderRequestKpis(); renderRequestIntents(); },
+    },
+    escalated: {
+      ids: ESC_IDS,
       sessions: () => state.filtered.filter(M.isEscalated),
       graphOpts: { outcome: M.escalationOutcome, outcomes: M.ESCALATION_OUTCOMES },
       lastColumn: 'Escalation reason',
@@ -645,15 +677,16 @@
   function renderFlow(name) {
     const f = FLOWS[name];
     const j = state[name];
+    if (name === 'escalation') renderEscalationMode();
     if (f.before) f.before();
     $(f.ids.steps).value = String(j.steps);
     $(f.ids.per).value = String(j.per);
     const opts = { ...f.graphOpts, maxSteps: j.steps, maxPerStep: j.per };
     const all = f.sessions();
-    renderIntentPicker(name, all);
+    renderIntentPicker(name, all, f.names);
     // The intent picker narrows the sessions first; colors still come from all of them,
     // so an intent keeps its color whichever intents are picked.
-    const base = M.withIntents(all, j.intents, j.match);
+    const base = M.withIntents(all, j.intents, j.match, f.names);
     const allGraph = M.journeyGraph(all, opts);
     const colors = window.AvaJourney.colorMap(allGraph);
     const graph = M.journeyGraph(base, { ...opts, focus: j.focus.map((x) => x.id) });
@@ -663,21 +696,27 @@
     crumbs.innerHTML = j.focus.length ? `<span class="muted small">Focused on</span>${j.focus.map((x, i) => `<span class="crumb">${esc(x.label)}<button type="button" data-i="${i}" aria-label="Remove ${esc(x.label)}">✕</button></span>`).join('')}<button type="button" class="btn btn-ghost" data-clear>Show all</button>` : '';
     crumbs.querySelectorAll('button[data-i]').forEach((b) => b.addEventListener('click', () => { j.focus.splice(Number(b.dataset.i), 1); renderFlow(name); }));
     if (j.focus.length) crumbs.querySelector('[data-clear]').addEventListener('click', () => { j.focus = []; renderFlow(name); });
-    const stepLabel = (i, cols) => (i === 0 ? 'Start' : i === cols - 1 ? f.lastColumn : i > j.steps ? 'Later' : `Intent ${i}`);
+    const stepLabel = (i, cols) => (i === 0 ? 'Start' : i === cols - 1 ? f.lastColumn : i > j.steps ? 'Later' : `${f.stepName || 'Intent'} ${i}`);
     const onFocus = (id, label) => {
       if (!j.focus.some((x) => x.id === id)) j.focus.push({ id, label });
       renderFlow(name);
     };
     window.AvaJourney.render($(f.ids.graph), graph, { colors, onFocus, tooltip: showTooltip, hideTooltip, columnLabels: stepLabel, nodeExtra: f.nodeExtra, startTitle: f.startTitle, emptyText: f.emptyText });
     renderTopPaths(name, graph, all);
+    if (name === 'escalation') renderRequestWhy();
     writeHash();
   }
 
   // Toggle chips for every intent in the flow's sessions, most common first.
   const CHIP_PREVIEW = 16;
-  function renderIntentPicker(name, sessions) {
+  function renderIntentPicker(name, sessions, namesOf) {
     const j = state[name];
-    const rows = M.intentTable(sessions);
+    let rows;
+    if (namesOf) {
+      const counts = new Map();
+      for (const s of sessions) for (const n of new Set(namesOf(s))) counts.set(n, (counts.get(n) || 0) + 1);
+      rows = [...counts].map(([intent, n]) => ({ intent, sessions: n })).sort((a, b) => b.sessions - a.sessions || a.intent.localeCompare(b.intent));
+    } else rows = M.intentTable(sessions);
     const host = $(FLOWS[name].ids.intents);
     if (!rows.length) {
       host.innerHTML = '';
@@ -709,10 +748,11 @@
     const f = FLOWS[name];
     const ids = new Set(graph.paths.map((p) => p.sessionId));
     const inGraph = sessions.filter((s) => ids.has(s.id));
-    const rows = M.topPaths(inGraph);
+    const namesOf = f.names || ((s) => M.intents(s).map((i) => i.name));
+    const rows = M.topPaths(inGraph, 15, namesOf);
     const bySeq = new Map();
     for (const s of inGraph) {
-      const key = M.sequenceFocus(M.intents(s).map((i) => i.name));
+      const key = M.sequenceFocus(namesOf(s));
       if (!bySeq.has(key)) bySeq.set(key, []);
       bySeq.get(key).push(s);
     }
@@ -778,6 +818,105 @@
       tr.addEventListener('click', act);
       tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') act(); });
     });
+  }
+
+  // ---------- Agent Escalation: asked for a person ----------
+  function renderEscalationMode() {
+    const mode = state.escalation.mode;
+    document.querySelectorAll('#esc-mode button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mode === mode)));
+    const request = mode === 'request';
+    $('esc-title').firstChild.textContent = request ? 'Intents before asking for a person ' : 'Escalation journeys ';
+    $('esc-hint').textContent = request
+      ? 'Sessions where the customer asked to speak to a person after raising other intents. Each path runs through those intents in order and ends in how the AVA answered the one right before the request. Hover a node or line to trace its sessions; click it to focus on just those sessions.'
+      : 'Only sessions handed to a person after the AVA. Each path runs through the customer’s intents in order and ends in why the session escalated. Hover a node or line to trace its sessions; click it to focus on just those sessions.';
+    $('esc-table-title').textContent = request ? 'Intents leading to “speak to a person”' : 'Intents driving escalations';
+    $('esc-table-hint').textContent = request ? 'Select a row to see how the AVA answered it and why' : 'Select a row to show only escalations with that intent';
+    $('esc-paths-title').textContent = request ? 'Most common journeys before asking for a person' : 'Most common escalation journeys';
+    document.querySelectorAll('[data-esc-mode]').forEach((el) => { el.hidden = el.dataset.escMode !== mode; });
+  }
+
+  function renderRequestKpis() {
+    const r = M.requestSummary(state.filtered);
+    const tiles = [
+      { label: 'Asked for a person', value: pct(r.rate, 1), meter: r.rate, sub: `${num(r.asked)} of ${num(r.sessions)} sessions with intents` },
+      { label: 'After other intents', value: num(r.afterIntents), sub: `${num(r.rightAway)} asked for a person straight away` },
+      { label: 'Intent most often right before', value: r.topLastIntent || '–', sub: r.topLastIntent ? `Right before the request in ${num(r.topLastCount)} of ${num(r.afterIntents)} sessions` : 'Waiting for Claude’s analysis', small: true },
+      { label: 'Asked after a poor answer', value: pct(r.failedRate, 1), meter: r.failedRate, sub: r.judged ? `${num(r.failed)} of ${num(r.judged)}: the AVA’s answer right before was not valid or partial` : 'Waiting for Claude’s analysis' },
+    ];
+    $('esc-kpis').innerHTML = tiles
+      .map((t) => `<div class="kpi"><div class="kpi-label">${esc(t.label)}</div><div class="kpi-value${t.small ? ' kpi-text' : ''}" title="${esc(t.value)}">${esc(t.value)}</div>` +
+        (t.meter != null ? `<div class="kpi-meter"><span style="width:${Math.min(100, t.meter * 100).toFixed(1)}%"></span></div>` : '') +
+        `<div class="kpi-sub">${esc(t.sub)}</div></div>`)
+      .join('');
+  }
+
+  // A stacked bar of how the AVA answered an intent before the customer asked for a person.
+  const ANSWER_ORDER = ['not_valid', 'partial', 'valid', 'no_chance'];
+  function verdictMix(v) {
+    const total = ANSWER_ORDER.reduce((a, k) => a + v[k], 0);
+    if (!total) return '<span class="muted">–</span>';
+    const title = ANSWER_ORDER.filter((k) => v[k]).map((k) => `${verdictLabel(k)}: ${v[k]}`).join(' · ');
+    return `<span class="mix" title="${esc(title)}">${ANSWER_ORDER.filter((k) => v[k]).map((k) => `<span class="mix-${k}" style="width:${((v[k] / total) * 100).toFixed(1)}%"></span>`).join('')}</span>`;
+  }
+
+  function renderRequestIntents() {
+    const rows = M.requestIntentTable(state.filtered);
+    const j = state.escalation;
+    const active = (r) => j.intents.length === 1 && j.intents[0] === r.intent;
+    const el = $('esc-intent-table');
+    el.innerHTML = '<thead><tr><th>Intent before the request</th><th class="num">Sessions</th><th class="num">Share of requests</th><th class="num">Request rate</th><th class="num">Right before the request</th><th>How the AVA answered</th><th class="num">Not valid or partial</th><th class="num">Not resolved</th></tr></thead><tbody>' +
+      (rows.length ? visibleRows('esc-intent-table', rows, active).map((r) => `<tr data-key="${esc(r.intent)}" class="${active(r) ? 'active' : ''}" tabindex="0">
+          <td class="cell-strong">${esc(r.intent)}</td>
+          <td class="num">${num(r.before)}</td>
+          ${rateCell(r.shareOfRequests)}
+          <td class="num" title="${num(r.before)} of ${num(r.sessions)} sessions with this intent went on to ask for a person">${pct(r.requestRate)} <span class="muted small">of ${num(r.sessions)}</span></td>
+          <td class="num">${num(r.rightBefore)}</td>
+          <td>${verdictMix(r.verdicts)}</td>
+          ${rateCell(r.notValidRate)}
+          ${rateCell(r.unresolvedRate)}
+        </tr>`).join('')
+        : '<tr class="empty"><td colspan="8">No sessions asked for a person after another intent yet.</td></tr>') + '</tbody>';
+    renderShowMore('esc-intent-table', rows.length);
+    el.querySelectorAll('tbody tr[data-key]').forEach((tr) => {
+      const act = () => {
+        const n = tr.dataset.key;
+        j.intents = j.intents.length === 1 && j.intents[0] === n ? [] : [n];
+        j.focus = [];
+        j.allNotes = false;
+        renderFlow('escalation');
+        if (j.intents.length) $('esc-why').scrollIntoView({ block: 'start', behavior: 'smooth' });
+      };
+      tr.addEventListener('click', act);
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') act(); });
+    });
+  }
+
+  // For one selected intent: how the AVA answered it before each request, in Claude's words.
+  const NOTE_PREVIEW = 8;
+  function renderRequestWhy() {
+    const j = state.escalation;
+    const card = $('esc-why');
+    const name = j.mode === 'request' && j.intents.length === 1 ? j.intents[0] : null;
+    const row = name && M.requestIntentTable(state.filtered).find((r) => r.intent === name);
+    card.hidden = !row;
+    if (!row) return;
+    const v = row.verdicts;
+    const notes = j.allNotes ? row.notes : row.notes.slice(0, NOTE_PREVIEW);
+    const reasons = new Map();
+    for (const n of row.notes) if (n.transferReason && n.transferReason !== 'none') reasons.set(n.transferReason, (reasons.get(n.transferReason) || 0) + 1);
+    const reasonText = [...reasons].sort((a, b) => b[1] - a[1]).map(([k, c]) => `${state.data.transferReasons.find((r) => r.key === k)?.label || k} ${num(c)}`).join(' · ');
+    $('esc-why-title').textContent = `Why customers asked for a person after “${name}”`;
+    $('esc-why-body').innerHTML = `<p class="why-summary">In <b>${num(row.before)}</b> sessions the customer raised this intent and then asked for a person (${pct(row.requestRate)} of the ${num(row.sessions)} sessions with it). Before the request, the AVA’s answer was
+        <span class="chip v-not_valid">not valid ${num(v.not_valid)}</span> <span class="chip v-partial">partial ${num(v.partial)}</span> <span class="chip v-valid">valid ${num(v.valid)}</span> <span class="chip v-no_chance">no chance to answer ${num(v.no_chance)}</span>.
+        ${row.unresolvedRate != null ? `Claude judged it not resolved in ${pct(row.unresolvedRate)} of the sessions where the AVA answered.` : ''} ${reasonText ? `Claude’s transfer reasons: ${esc(reasonText)}.` : ''}</p>
+      <ol class="why-list">${notes.map((n, i) => `<li><div class="intent-head"><span class="chip v-${esc(n.verdict)}">${esc(verdictLabel(n.verdict))}</span><span class="muted small">${esc(fmtDateTime(n.start))}${n.escalated ? ' · escalated' : ' · not escalated'}</span><button type="button" class="btn btn-ghost" data-open="${esc(n.sessionId)}">Open session</button></div>
+        ${n.customerAsked ? `<div class="cell-sub">Customer: ${esc(n.customerAsked)}</div>` : ''}<div class="why-text">${esc(n.why || 'No note from Claude.')}</div></li>`).join('')}</ol>
+      ${row.notes.length > NOTE_PREVIEW ? `<button type="button" class="btn btn-ghost" id="esc-why-more">${j.allNotes ? 'Show fewer' : `Show all ${num(row.notes.length)}`}</button>` : ''}`;
+    card.querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => {
+      const s = state.filtered.find((x) => x.id === b.dataset.open);
+      if (s) openSession(s);
+    }));
+    $('esc-why-more')?.addEventListener('click', () => { j.allNotes = !j.allNotes; renderRequestWhy(); });
   }
 
   // ---------- Events ----------
@@ -853,6 +992,10 @@
         if (flowStale[name]) { flowStale[name] = false; renderFlow(name); }
       });
     }
+    document.querySelectorAll('#esc-mode button').forEach((b) => b.addEventListener('click', () => {
+      Object.assign(state.escalation, { mode: b.dataset.mode, focus: [], intents: [], allNotes: false });
+      renderFlow('escalation');
+    }));
     let resizeTimer;
     window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (state.tab in FLOWS && state.data) renderFlow(state.tab); }, 150); });
     setTab(state.tab);

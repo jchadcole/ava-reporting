@@ -375,9 +375,10 @@
   const sequenceFocus = (names) => SEQ + names.join('\u0001');
   const MORE = 'More intents';
 
-  // `outcome` and `outcomes` swap the end column, e.g. the escalation reason on Agent Escalation.
-  function journeyGraph(sessions, { maxSteps = 4, maxPerStep = 8, focus = [], outcome = sessionVerdict, outcomes = OUTCOMES } = {}) {
-    const raw = sessions.filter((s) => intents(s).length).map((s) => ({ id: s.id, names: intents(s).map((i) => i.name), outcome: outcome(s) }));
+  const intentNames = (s) => intents(s).map((i) => i.name);
+  // `names` picks which intents make up each path, and `outcome` and `outcomes` swap the end column, e.g. the escalation reason on Agent Escalation.
+  function journeyGraph(sessions, { maxSteps = 4, maxPerStep = 8, focus = [], outcome = sessionVerdict, outcomes = OUTCOMES, names: namesOf = intentNames } = {}) {
+    const raw = sessions.map((s) => ({ id: s.id, names: namesOf(s), outcome: outcome(s) })).filter((r) => r.names.length);
     // Most common intents per step, counted before folding so the cut is stable.
     const keep = [];
     for (let step = 1; step <= maxSteps; step++) {
@@ -438,19 +439,19 @@
   }
 
   // Sessions that include any (or all) of the given intents; no intents keeps every session.
-  function withIntents(sessions, names = [], match = 'any') {
+  function withIntents(sessions, names = [], match = 'any', namesOf = intentNames) {
     if (!names.length) return sessions;
     return sessions.filter((s) => {
-      const have = new Set(intents(s).map((i) => i.name));
+      const have = new Set(namesOf(s));
       return match === 'all' ? names.every((n) => have.has(n)) : names.some((n) => have.has(n));
     });
   }
 
   // The most common full intent sequences, for the table under the graph.
-  function topPaths(sessions, limit = 15) {
+  function topPaths(sessions, limit = 15, namesOf = intentNames) {
     const rows = new Map();
     for (const s of sessions) {
-      const names = intents(s).map((i) => i.name);
+      const names = namesOf(s);
       if (!names.length) continue;
       const key = names.join(' → ');
       if (!rows.has(key)) rows.set(key, { path: names, sessions: 0, allValid: 0, scored: 0 });
@@ -484,10 +485,9 @@
   }
   // Asking for a person is how a hand-off happens, not why, so it is skipped when picking the
   // intent the customer raised last before the hand-off (unless it is the only one).
-  const AGENT_REQUEST = /\b(person|agent|human|representative|someone|operator|live chat)\b/i;
   function lastIntentBeforeEscalation(s) {
     const names = intents(s).map((i) => i.name);
-    const real = names.filter((n) => !AGENT_REQUEST.test(n));
+    const real = names.filter((n) => !isPersonRequest(n));
     return (real.length ? real : names).at(-1) || null;
   }
   const topKey = (counts) => [...counts].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))[0]?.[0] ?? null;
@@ -562,12 +562,116 @@
     };
   }
 
+  // ---------- Asking for a person ----------
+  // Claude names intents freely, so a request for a person is recognized from the intent's name;
+  // Genesys also flags a session when the customer asked for an agent (AgentRequestedByUser).
+  const PERSON_REQUEST = /\b(speak|talk|chat|connect|transfer|escalat\w*|request|want|need|get)\b.*\b(person|agent|human|representative|rep|someone|somebody|operator|staff|specialist|advisor|associate)\b|\b(live|human|real) (agent|person|representative|chat)\b|\brepresentative\b|\boperator\b/i;
+  const isPersonRequest = (name) => PERSON_REQUEST.test(name || '');
+  const askedForPerson = (s) => intents(s).some((i) => isPersonRequest(i.name)) || Boolean(s.agentRequested && intents(s).length);
+  // The intents the customer raised before first asking for a person (all of them when only
+  // Genesys flagged the request).
+  function intentsBeforeRequest(s) {
+    if (!askedForPerson(s)) return [];
+    const all = intents(s);
+    const at = all.findIndex((i) => isPersonRequest(i.name));
+    return (at < 0 ? all : all.slice(0, at)).filter((i) => !isPersonRequest(i.name));
+  }
+  const namesBeforeRequest = (s) => intentsBeforeRequest(s).map((i) => i.name);
+  // How the AVA answered the intent raised right before the request.
+  const REQUEST_OUTCOMES = [
+    { key: 'not_valid', label: 'AVA’s answer was not valid' },
+    { key: 'partial', label: 'AVA’s answer was partial' },
+    { key: 'valid', label: 'AVA answered, customer still asked' },
+    { key: 'no_chance', label: 'Asked before the AVA answered' },
+  ];
+  const requestLabel = (key) => REQUEST_OUTCOMES.find((o) => o.key === key)?.label || key;
+  function requestOutcome(s) {
+    const before = intentsBeforeRequest(s);
+    return before.length ? before.at(-1).verdict : null;
+  }
+
+  // Per intent raised before a request for a person: how often, how often it came right before
+  // the request, how the AVA answered it, and Claude's notes on those answers.
+  function requestIntentTable(sessions) {
+    const rows = new Map();
+    const withAny = sessions.filter((s) => intents(s).length);
+    const requests = withAny.filter(askedForPerson).length;
+    for (const s of withAny) {
+      const asked = askedForPerson(s);
+      const before = intentsBeforeRequest(s);
+      const beforeNames = new Set(before.map((i) => i.name));
+      const seen = new Set();
+      for (const i of intents(s)) {
+        if (isPersonRequest(i.name) || seen.has(i.name)) continue;
+        seen.add(i.name);
+        if (!rows.has(i.name)) rows.set(i.name, { intent: i.name, sessions: 0, before: 0, rightBefore: 0, verdicts: { valid: 0, partial: 0, not_valid: 0, no_chance: 0 }, unresolved: 0, handled: 0, escalated: 0, notes: [] });
+        const r = rows.get(i.name);
+        r.sessions++;
+        if (!asked || !beforeNames.has(i.name)) continue;
+        r.before++;
+        if (before.at(-1).name === i.name) r.rightBefore++;
+        if (isEscalated(s)) r.escalated++;
+        const same = before.filter((x) => x.name === i.name);
+        const worst = ['not_valid', 'partial', 'valid', 'no_chance'].find((v) => same.some((x) => x.verdict === v)) || 'no_chance';
+        r.verdicts[worst]++;
+        if (worst !== 'no_chance') {
+          r.handled++;
+          if (same.some((x) => x.resolved === false)) r.unresolved++;
+        }
+        const x = same.find((y) => y.verdict === worst);
+        r.notes.push({ sessionId: s.id, start: s.start, verdict: worst, customerAsked: x?.customerAsked || '', why: x?.why || '', transferReason: s.analysis?.transferReason || null, escalated: isEscalated(s) });
+      }
+    }
+    const order = { not_valid: 0, partial: 1, valid: 2, no_chance: 3 };
+    return [...rows.values()].filter((r) => r.before).map((r) => {
+      const judgedCount = r.verdicts.valid + r.verdicts.partial + r.verdicts.not_valid;
+      return {
+        intent: r.intent, sessions: r.sessions, before: r.before, rightBefore: r.rightBefore,
+        shareOfRequests: ratio(r.before, requests),
+        requestRate: ratio(r.before, r.sessions),
+        verdicts: r.verdicts,
+        notValidRate: ratio(r.verdicts.not_valid + r.verdicts.partial, judgedCount),
+        unresolvedRate: ratio(r.unresolved, r.handled),
+        escalatedRate: ratio(r.escalated, r.before),
+        notes: r.notes.sort((a, b) => order[a.verdict] - order[b.verdict] || String(b.start || '').localeCompare(String(a.start || ''))),
+      };
+    }).sort((a, b) => b.before - a.before || b.rightBefore - a.rightBefore || a.intent.localeCompare(b.intent));
+  }
+
+  function requestSummary(sessions) {
+    const withAny = sessions.filter((s) => intents(s).length);
+    const asked = withAny.filter(askedForPerson);
+    const rightAway = asked.filter((s) => !intentsBeforeRequest(s).length).length;
+    const lasts = new Map();
+    const outcomes = new Map();
+    for (const s of asked) {
+      const b = intentsBeforeRequest(s);
+      if (!b.length) continue;
+      lasts.set(b.at(-1).name, (lasts.get(b.at(-1).name) || 0) + 1);
+      outcomes.set(b.at(-1).verdict, (outcomes.get(b.at(-1).verdict) || 0) + 1);
+    }
+    const topLast = topKey(lasts);
+    const failed = (outcomes.get('not_valid') || 0) + (outcomes.get('partial') || 0);
+    const judgedCount = failed + (outcomes.get('valid') || 0);
+    return {
+      sessions: withAny.length,
+      asked: asked.length,
+      rate: ratio(asked.length, withAny.length),
+      rightAway,
+      afterIntents: asked.length - rightAway,
+      topLastIntent: topLast, topLastCount: topLast ? lasts.get(topLast) : 0,
+      failed, judged: judgedCount, failedRate: ratio(failed, judgedCount),
+      escalated: asked.filter(isEscalated).length,
+      reachedAgent: asked.filter((s) => s.handoff === 'agent').length,
+    };
+  }
+
   function localDay(d) {
     const x = new Date(d);
     return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
   }
 
-  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, containmentExplanation, abandonment, abandonmentSummary, ABANDON_RULES, NOT_ABANDONED, EXIT_LABEL, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, isEscalated, ESCALATION_OUTCOMES, escalationOutcome, escalationLabel, lastIntentBeforeEscalation, escalationIntentTable, escalationSummary, localDay };
+  const api = { sessionVerdict, SESSION_VERDICT_LABEL, intents, judged, issueCount, median, applyFilters, options, summarize, intentTable, agentTable, containment, containmentSummary, containmentExplanation, abandonment, abandonmentSummary, ABANDON_RULES, NOT_ABANDONED, EXIT_LABEL, CONTAINMENT_RULES, NOT_CONTAINED, journeyGraph, linkCounts, topPaths, withIntents, sequenceFocus, OUTCOMES, isEscalated, ESCALATION_OUTCOMES, escalationOutcome, escalationLabel, lastIntentBeforeEscalation, escalationIntentTable, escalationSummary, isPersonRequest, askedForPerson, intentsBeforeRequest, namesBeforeRequest, REQUEST_OUTCOMES, requestLabel, requestOutcome, requestIntentTable, requestSummary, localDay };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.AvaMetrics = api;
 })(typeof window !== 'undefined' ? window : globalThis);
