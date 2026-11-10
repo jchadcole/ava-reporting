@@ -8,6 +8,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { fetchTurns } = require('./detail');
 const { getOrg, listOrgs } = require('./orgs');
+const { providerInfo } = require('./claude');
 const { buildAvaTurns, avaResponse } = require('./ava');
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -65,7 +66,7 @@ async function handleApi(req, res, url) {
     if (endMs - startMs > MAX_RANGE_DAYS * 86_400_000) return sendJson(res, 400, { error: `Date range is limited to ${MAX_RANGE_DAYS} days` });
     const key = `ava:${org.key}:${new Date(startMs).toISOString()}:${new Date(endMs).toISOString()}`;
     const build = await cached(key, () => buildAvaTurns(org.client, start, end));
-    return sendJson(res, 200, avaResponse(org.key, build));
+    return sendJson(res, 200, avaResponse(org.key, build, org));
   }
 
   if (url.pathname === '/api/ava/session') {
@@ -118,4 +119,8 @@ const server = http.createServer(async (req, res) => {
   serveStatic(res, url.pathname);
 });
 
-server.listen(PORT, HOST, () => console.log(`AVA reporting dashboard on http://${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => {
+  console.log(`AVA reporting dashboard on http://${HOST}:${PORT}`);
+  const llm = providerInfo();
+  console.log(llm.provider === 'bedrock' ? `Claude analysis: Amazon Bedrock (${llm.api}) in ${llm.region || 'no region set'}` : `Claude analysis: ${llm.provider === 'anthropic' ? "Anthropic's API" : 'off'}`);
+});
