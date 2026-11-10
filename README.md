@@ -22,7 +22,24 @@ These are on the **Overview** tab. The definitions behind each number are at the
 
 Genesys does not record an intent on AVA turns (it only does for classic NLU bot steps), so `server/ava.js` sends each session's AVA transcript to Claude, which lists the intents and judges the response to each as valid, partly valid, not valid, or customer left first. The transcript includes what Genesys recorded on each turn (tool calls and their status, guardrail blocks, errors, the customer saying nothing). Long digit runs such as card numbers and PINs are masked first. Claude is shown the intent names already used for the same AVA so a request keeps the same name across sessions.
 
-This only runs when `ANTHROPIC_API_KEY` is set. Analyses run in the background, newest sessions first, up to `MAX_AVA_ANALYSES` per date range load (press Refresh to continue), and the page fills in as they finish. Each session is analyzed once and saved in `data/ava-analyses.json`; it is redone only if more turns arrive. Without a key, sessions still show Genesys's own flags.
+This only runs when Claude is configured: `ANTHROPIC_API_KEY` for Anthropic's API, or `LLM_PROVIDER=bedrock` for Amazon Bedrock in your own AWS account (see below). Analyses run in the background, newest sessions first, up to `MAX_AVA_ANALYSES` per date range load (press Refresh to continue), and the page fills in as they finish. Each session is analyzed once and saved in `data/ava-analyses.json`; it is redone only if more turns arrive. Without a key, sessions still show Genesys's own flags.
+
+### Claude through Amazon Bedrock (government and regulated use)
+
+Anthropic's API is not FedRAMP authorized. For a government org, or any customer that needs data to stay in its own cloud, send the analysis to Claude on Amazon Bedrock instead, for example in AWS GovCloud (US):
+
+```
+LLM_PROVIDER=bedrock
+AWS_REGION=us-gov-west-1
+AVA_MODEL=claude-opus-5-5        # becomes anthropic.claude-opus-5-5; or give a full Bedrock model or inference profile ID
+# AWS_PROFILE=agency-sso         # credentials come from the normal AWS chain (SSO, profile, instance or task role)
+# BEDROCK_API=invoke             # use bedrock-runtime InvokeModel instead of the Messages endpoint
+# BEDROCK_BASE_URL=https://...   # a FIPS or VPC interface endpoint
+```
+
+No Anthropic key is used. The AWS identity needs permission to invoke the chosen model, and the model must be enabled for the account in that region. Check AWS's Bedrock model list for which Claude models are authorized at the level you need.
+
+Orgs on Genesys Cloud's FedRAMP environment (`us-gov` regions such as `use2.us-gov-pure.cloud`), and any org with `GENESYS_<NAME>_GOVERNMENT=true`, are never sent to Anthropic's API: with `LLM_PROVIDER=anthropic` their analysis stays off and the page says why.
 
 ## How it works
 
@@ -65,7 +82,12 @@ The OAuth client needs read access to analytics (bot aggregates, bot reporting t
 | `EXCLUDE_BOT_TYPES` | `VOICESURVEY` | Bot flow types left out of the report |
 | `MASK_SENSITIVE` | `true` | Mask long digit runs and sensitive slots in transcripts |
 | `CACHE_TTL_SECONDS` | `120` | Server-side cache lifetime |
-| `ANTHROPIC_API_KEY` | unset | Turns on the intent analysis (sends masked AVA transcripts to Anthropic) |
+| `LLM_PROVIDER` | `anthropic` if a key is set, else `off` | Where Claude calls go: `anthropic`, `bedrock` or `off` |
+| `ANTHROPIC_API_KEY` | unset | Turns on the intent analysis through Anthropic's API (sends masked AVA transcripts to Anthropic) |
+| `AWS_REGION` or `BEDROCK_REGION` | unset | Bedrock region, e.g. `us-gov-west-1`. Required for `bedrock` |
+| `BEDROCK_API` | `mantle` | `mantle` (Bedrock's Messages endpoint) or `invoke` (bedrock-runtime InvokeModel) |
+| `BEDROCK_BASE_URL` | unset | Override the Bedrock endpoint, e.g. a FIPS or VPC endpoint |
+| `GENESYS_<NAME>_GOVERNMENT` | `false` | Mark an org as government so it is never sent to Anthropic's API (us-gov regions are marked automatically) |
 | `AVA_MODEL` | `claude-opus-5-5` | Claude model used for the analysis |
 | `AVA_ANALYSIS` | on | Set to `off` to stop sending transcripts even when a key is set |
 | `MAX_AVA_ANALYSES` | `300` | Sessions analyzed per date range load, newest first |

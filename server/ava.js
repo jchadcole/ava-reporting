@@ -13,7 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { mapLimit } = require('./genesys');
 const { maskText, summarizeTurn, turnResponseMs } = require('./detail');
-const { claudeEnabled, askJson, isFatalClaudeError } = require('./claude');
+const { claudeEnabled, askJson, isFatalClaudeError, blockedForOrg, providerInfo } = require('./claude');
 
 const BOT_AGG = '/api/v2/analytics/bots/aggregates/query';
 const DETAILS = '/api/v2/analytics/conversations/details/query';
@@ -405,8 +405,8 @@ function analysisEnabled() {
 }
 
 // Queue every session in the build that has a customer request and no current analysis.
-function queueAnalyses(orgKey, build) {
-  if (!analysisEnabled() || status.error) return;
+function queueAnalyses(orgKey, build, org) {
+  if (!analysisEnabled() || status.error || blockedForOrg(org)) return;
   const waiting = build.sessions.filter((s) => s.customerTurns > 0 && !isCurrent(savedAnalysis(orgKey, s))).slice(0, MAX_ANALYSES);
   for (const s of waiting) {
     const key = storeKey(orgKey, s.id);
@@ -467,8 +467,8 @@ async function buildAvaTurns(client, startIso, endIso) {
 }
 
 // What the browser gets: the sessions with whatever analyses exist so far, plus progress.
-function avaResponse(orgKey, build) {
-  queueAnalyses(orgKey, build);
+function avaResponse(orgKey, build, org) {
+  queueAnalyses(orgKey, build, org);
   const pending = new Set([...queue.values()].filter((j) => j.orgKey === orgKey).map((j) => j.session.id));
   let analyzed = 0;
   let current = 0;
@@ -488,6 +488,8 @@ function avaResponse(orgKey, build) {
     meta: { turnsTruncated: build.truncated, detailsTruncated: build.detailsTruncated },
     analysis: {
       enabled: analysisEnabled(),
+      blocked: analysisEnabled() ? blockedForOrg(org) : null,
+      ...providerInfo(),
       model: MODEL,
       analyzed,
       current,

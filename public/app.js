@@ -181,13 +181,14 @@
     const a = state.data.analysis;
     const el = $('progress');
     let text = '';
-    if (!a.enabled) text = 'Intents and response verdicts need Claude: add ANTHROPIC_API_KEY to .env and restart the server. Until then the sessions show only Genesys’s own flags.';
+    if (!a.enabled) text = 'Intents and response verdicts need Claude: set ANTHROPIC_API_KEY, or LLM_PROVIDER=bedrock with an AWS region, in .env and restart the server. Until then the sessions show only Genesys’s own flags.';
+    else if (a.blocked) text = `Claude analysis is off for this org. ${a.blocked}`;
     else if (a.error) text = `Claude analysis stopped: ${a.error}`;
     else if (a.pending) text = `Claude is reading AVA transcripts: ${num(a.analyzed)} of ${num(a.withRequests)} sessions done. The page updates as they finish.`;
     else if (a.analyzed < a.withRequests) text = `Claude has read ${num(a.analyzed)} of ${num(a.withRequests)} sessions with a customer request (up to ${num(a.limit)} per load, newest first). Refresh to continue.`;
     el.hidden = !text;
     el.textContent = text;
-    el.classList.toggle('error', !!a.error);
+    el.classList.toggle('error', !!a.error || !!a.blocked);
   }
 
   function fillSelect(id, allLabel, items, selected) {

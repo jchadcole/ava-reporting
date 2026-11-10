@@ -11,6 +11,8 @@ require.cache[require.resolve('../server/claude')] = {
   exports: {
     claudeEnabled: () => true,
     isFatalClaudeError: () => false,
+    blockedForOrg: (org) => (org?.government ? 'blocked' : null),
+    providerInfo: () => ({ provider: 'test' }),
     askJson: async ({ input }) => {
       calls.push(input);
       return { refused: false, model: 'test', usage: { input: 10, output: 5 }, data: { intents: [{ name: 'Renew driver license', customerAsked: 'Renew a license', verdict: 'valid', why: 'It renewed it.' }, { name: 'Speak to a person', customerAsked: 'Wants an agent', verdict: 'valid', why: 'It transferred.' }] } };
