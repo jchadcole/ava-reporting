@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { provider, claudeEnabled, modelId, buildRequest, isGovernmentOrg, blockedForOrg } = require('../server/claude');
+const { provider, claudeEnabled, modelId, buildRequest, isGovernmentOrg, blockedForOrg, overrideWarning } = require('../server/claude');
 
 const args = { model: 'claude-opus-5-5', system: 'sys', input: 'hi', schema: { type: 'object' } };
 
@@ -45,4 +45,14 @@ test('government orgs never go to the Anthropic API', () => {
   assert.match(blockedForOrg(gov, { ANTHROPIC_API_KEY: 'k' }), /FedRAMP/);
   assert.equal(blockedForOrg(gov, { LLM_PROVIDER: 'bedrock', AWS_REGION: 'us-gov-west-1' }), null);
   assert.equal(blockedForOrg({ region: 'mypurecloud.com' }, { ANTHROPIC_API_KEY: 'k' }), null);
+});
+
+test('ALLOW_ANTHROPIC lets one government test org use the Anthropic API, with a warning', () => {
+  const env = { ANTHROPIC_API_KEY: 'k' };
+  const allowed = { region: 'use2.us-gov-pure.cloud', allowAnthropic: true };
+  assert.equal(blockedForOrg(allowed, env), null);
+  assert.match(overrideWarning(allowed, env), /not FedRAMP authorized/);
+  assert.equal(overrideWarning({ region: 'use2.us-gov-pure.cloud' }, env), null);
+  assert.equal(overrideWarning({ region: 'mypurecloud.com', allowAnthropic: true }, env), null);
+  assert.equal(overrideWarning(allowed, { LLM_PROVIDER: 'bedrock', AWS_REGION: 'us-gov-west-1' }), null);
 });

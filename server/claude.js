@@ -100,17 +100,26 @@ const isFatalClaudeError = (err) =>
 
 // Genesys Cloud's FedRAMP environment lives on us-gov hosts (e.g. use2.us-gov-pure.cloud).
 // Data from such an org must never go to Anthropic's commercial API, which is not FedRAMP
-// authorized. GENESYS_<NAME>_GOVERNMENT=true marks other orgs the same way.
+// authorized. GENESYS_<NAME>_GOVERNMENT=true marks other orgs the same way, and
+// GENESYS_<NAME>_ALLOW_ANTHROPIC=true lets a test org through anyway, with a warning.
 function isGovernmentOrg(org) {
   return Boolean(org?.government) || /us-gov|fedramp/i.test(org?.region || '');
 }
 
 // Why Claude may not read this org's transcripts, or null when it may.
 function blockedForOrg(org, env = process.env) {
-  if (isGovernmentOrg(org) && provider(env) === 'anthropic') {
+  if (isGovernmentOrg(org) && provider(env) === 'anthropic' && !org.allowAnthropic) {
     return 'This is a government (FedRAMP) org, and Anthropic’s API is not FedRAMP authorized. Set LLM_PROVIDER=bedrock with a GovCloud region to analyze it.';
   }
   return null;
 }
 
-module.exports = { claudeEnabled, askJson, isFatalClaudeError, provider, providerInfo, modelId, buildRequest, isGovernmentOrg, blockedForOrg };
+// A government org that was explicitly allowed onto Anthropic's API (GENESYS_<NAME>_ALLOW_ANTHROPIC=true).
+function overrideWarning(org, env = process.env) {
+  if (isGovernmentOrg(org) && provider(env) === 'anthropic' && org.allowAnthropic) {
+    return 'Test override: this government org is being analyzed through Anthropic’s API, which is not FedRAMP authorized.';
+  }
+  return null;
+}
+
+module.exports = { claudeEnabled, askJson, isFatalClaudeError, provider, providerInfo, modelId, buildRequest, isGovernmentOrg, blockedForOrg, overrideWarning };
