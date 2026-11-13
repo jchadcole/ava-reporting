@@ -13,7 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { mapLimit } = require('./genesys');
 const { maskText, summarizeTurn, turnResponseMs } = require('./detail');
-const { claudeEnabled, askJson, isFatalClaudeError, blockedForOrg, providerInfo } = require('./claude');
+const { claudeEnabled, askJson, isFatalClaudeError, blockedForOrg, overrideWarning, providerInfo } = require('./claude');
 
 const BOT_AGG = '/api/v2/analytics/bots/aggregates/query';
 const DETAILS = '/api/v2/analytics/conversations/details/query';
@@ -489,6 +489,7 @@ function avaResponse(orgKey, build, org) {
     analysis: {
       enabled: analysisEnabled(),
       blocked: analysisEnabled() ? blockedForOrg(org) : null,
+      warning: analysisEnabled() ? overrideWarning(org) : null,
       ...providerInfo(),
       model: MODEL,
       analyzed,

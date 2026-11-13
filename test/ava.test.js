@@ -12,6 +12,7 @@ require.cache[require.resolve('../server/claude')] = {
     claudeEnabled: () => true,
     isFatalClaudeError: () => false,
     blockedForOrg: (org) => (org?.government ? 'blocked' : null),
+    overrideWarning: () => null,
     providerInfo: () => ({ provider: 'test' }),
     askJson: async ({ input }) => {
       calls.push(input);
