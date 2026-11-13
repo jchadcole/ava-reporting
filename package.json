@@ -1,6 +1,6 @@
 {
   "name": "ava-reporting",
-  "version": "0.1.0",
+  "version": "4.0.0",
   "private": true,
   "description": "Intent and response-quality reporting for Genesys Cloud Agentic Virtual Agents (AVA)",
   "license": "MIT",
@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node --env-file=.env server/index.js",
-    "test": "node --test"
+    "test": "node --test",
+    "archive": "node --env-file=.env server/archive.js"
   },
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^1.1.1",

@@ -4,6 +4,11 @@
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Two kinds of client share the request code:
+//   createClient: the server's own OAuth client (client credentials). Used when the
+//     dashboard runs for one person, and by the daily turn-data archive job.
+//   createUserClient: the signed-in viewer's own access token, so Genesys applies that
+//     person's permissions and divisions to every call.
 function createClient({ clientId, clientSecret, region = 'mypurecloud.com' }) {
   let cachedToken = null; // { value, expiresAt }
 
@@ -45,17 +50,43 @@ function createClient({ clientId, clientSecret, region = 'mypurecloud.com' }) {
       cachedToken = null;
       return request(path, body, attempt + 1);
     }
-    const text = await res.text();
-    const json = text ? JSON.parse(text) : {};
-    if (!res.ok) {
-      const err = new Error(`Genesys ${res.status} on ${path}: ${json.message || text.slice(0, 200)}`);
-      err.status = res.status;
-      throw err;
-    }
-    return json;
+    return readJson(res, path);
   }
 
   return { request, region };
+}
+
+function createUserClient({ token, region = 'mypurecloud.com' }) {
+  async function request(path, body, attempt = 0) {
+    const res = await fetch(`https://api.${region}${path}`, {
+      method: body ? 'POST' : 'GET',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if ((res.status === 429 || res.status >= 500) && attempt < 4) {
+      const retryAfter = Number(res.headers.get('retry-after')) || 2 ** attempt;
+      await sleep(retryAfter * 1000);
+      return request(path, body, attempt + 1);
+    }
+    return readJson(res, path);
+  }
+  return { request, region, user: true };
+}
+
+async function readJson(res, path) {
+  const text = await res.text();
+  let json = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = {};
+  }
+  if (!res.ok) {
+    const err = new Error(`Genesys ${res.status} on ${path.split('?')[0]}: ${json.message || text.slice(0, 200)}`);
+    err.status = res.status;
+    throw err;
+  }
+  return json;
 }
 
 // Run async fn over items with bounded concurrency to stay under API rate limits.
@@ -72,4 +103,4 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
-module.exports = { createClient, mapLimit };
+module.exports = { createClient, createUserClient, mapLimit };

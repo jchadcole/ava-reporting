@@ -22,6 +22,7 @@
         <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
       </div>
       <button type="button" class="btn" id="refresh">Refresh</button>
+      <span class="account" id="account" hidden><span class="muted" id="account-name"></span><button type="button" class="btn btn-ghost" id="sign-out">Sign out</button></span>
     </div>
   </header>
 
@@ -40,6 +41,9 @@
         <option value="3">Last 3 days</option>
         <option value="7" selected>Last 7 days</option>
         <option value="10">Last 10 days</option>
+        <option value="30" data-archive hidden disabled>Last 30 days</option>
+        <option value="60" data-archive hidden disabled>Last 60 days</option>
+        <option value="90" data-archive hidden disabled>Last 90 days</option>
         <option value="custom">Custom…</option>
       </select>
     </label>
@@ -180,7 +184,7 @@
           <br>Where each input comes from. <b>Genesys</b>: how the session ended (the AVA’s end reason and how the customer’s side disconnected: hung up or left, timed out, natural completion; Genesys has no signal for a channel switch) and the number of customer turns. <b>Claude</b>, inferred from the transcript: what the AVA’s last message was doing (an error result Genesys records overrides it), whether the customer went silent after a failure, plus the containment inputs above.</dd>
         <dt>Genesys flags</dt><dd>What Genesys itself recorded on the AVA’s turns, with no AI judgment: an error result, a guardrail that blocked a reply, a tool call that did not succeed, or customer input that got no reply. A flag doesn’t always mean a bad response (a guardrail can rightly block a request), and a response can be wrong without any flag, which is why the verdicts come from reading the transcript.</dd>
         <dt>AVA reply time</dt><dd>For each customer turn, the time from when Genesys captured the customer’s input until the AVA had its reply ready.</dd>
-        <dt>Data window</dt><dd>Everything here comes from Genesys’s turn-level data, which it appears to keep for only about the last 10 days, so ranges further back come up empty.</dd>
+        <dt>Data window</dt><dd>Everything here comes from Genesys’s turn-level data, which it appears to keep for only about the last 10 days. When the server’s daily archive is on, it saves each finished day to disk, so ranges of 30, 60 and 90 days become available from the first saved day onward.</dd>
       </dl>
     </section>
   </div>
@@ -288,6 +292,7 @@
     </div>
   </aside>
 
+  <script src="auth.js"></script>
   <script src="metrics.js"></script>
   <script src="journey.js"></script>
   <script src="app.js"></script>
