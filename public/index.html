@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AVA Dashboard</title>
+  <meta name="color-scheme" content="light dark">
   <link rel="stylesheet" href="styles.css">
+  <script src="theme.js"></script>
 </head>
 <body>
   <header class="page-header">
@@ -14,6 +16,11 @@
     </div>
     <div class="header-actions">
       <span class="muted" id="updated"></span>
+      <div class="seg theme-switch" id="theme-switch" role="group" aria-label="Color theme">
+        <button type="button" data-theme-choice="auto" aria-pressed="true" title="Follow the computer's light or dark setting">Auto</button>
+        <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+        <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+      </div>
       <button type="button" class="btn" id="refresh">Refresh</button>
     </div>
   </header>
