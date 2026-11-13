@@ -1,8 +1,8 @@
 {
   "name": "ava-reporting",
-  "version": "0.1.0",
+  "version": "4.0.0",
   "private": true,
-  "description": "Custom containment and intent reporting for Genesys Cloud virtual agents (AVA)",
+  "description": "Intent and response-quality reporting for Genesys Cloud Agentic Virtual Agents (AVA)",
   "license": "MIT",
   "engines": {
     "node": ">=20"
@@ -10,9 +10,10 @@
   "scripts": {
     "start": "node --env-file=.env server/index.js",
     "test": "node --test",
-    "snapshot": "node scripts/snapshot.js"
+    "archive": "node --env-file=.env server/archive.js"
   },
   "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^1.1.1",
     "@anthropic-ai/sdk": "^0.133.0"
   }
 }
