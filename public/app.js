@@ -244,9 +244,10 @@
     else if (a.error) text = `Claude analysis stopped: ${a.error}`;
     else if (a.pending) text = `Claude is reading AVA transcripts: ${num(a.analyzed)} of ${num(a.withRequests)} sessions done. The page updates as they finish.`;
     else if (a.analyzed < a.withRequests) text = `Claude has read ${num(a.analyzed)} of ${num(a.withRequests)} sessions with a customer request (up to ${num(a.limit)} per load, newest first). Refresh to continue.`;
+    if (a.warning) text = text ? `${a.warning} ${text}` : a.warning;
     el.hidden = !text;
     el.textContent = text;
-    el.classList.toggle('error', !!a.error || !!a.blocked);
+    el.classList.toggle('error', !!a.error || !!a.blocked || !!a.warning);
   }
 
   function fillSelect(id, allLabel, items, selected) {

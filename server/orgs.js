@@ -8,6 +8,7 @@
 // The name is what the org picker shows; GENESYS_<NAME>_LABEL overrides it with a longer one.
 // GENESYS_<NAME>_GOVERNMENT=true marks a government org (us-gov regions are marked automatically),
 // so its transcripts never go to Anthropic's commercial API (see server/claude.js).
+// GENESYS_<NAME>_ALLOW_ANTHROPIC=true lifts that for one org, for test orgs with test data only.
 //
 // One org: GENESYS_CLIENT_ID / GENESYS_CLIENT_SECRET / GENESYS_REGION, named from Genesys.
 //
@@ -18,6 +19,7 @@
 // CLIENT_SECRET pair then becomes optional: it is only used by the daily turn-data archive.
 
 const { createClient } = require('./genesys');
+const { isGovernmentOrg } = require('./claude');
 
 const envName = (name) => name.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
 const signInMode = (env = process.env) => ((env.SIGN_IN || '').toLowerCase() === 'genesys' ? 'genesys' : 'server');
@@ -29,7 +31,7 @@ function orgConfig(env, p, base) {
   const grant = (env[`${p}SIGNIN_GRANT`] || 'pkce').toLowerCase() === 'implicit' ? 'implicit' : 'pkce';
   const service = Boolean(clientId && clientSecret);
   const missing = signInMode(env) === 'genesys' ? !signInClientId : !service;
-  return { ...base, clientId, clientSecret, region: env[`${p}REGION`] || 'mypurecloud.com', government: env[`${p}GOVERNMENT`] === 'true', orgId: env[`${p}ORG_ID`] || null, signInClientId, grant, service, missing };
+  return { ...base, clientId, clientSecret, region: env[`${p}REGION`] || 'mypurecloud.com', government: env[`${p}GOVERNMENT`] === 'true', allowAnthropic: env[`${p}ALLOW_ANTHROPIC`] === 'true', orgId: env[`${p}ORG_ID`] || null, signInClientId, grant, service, missing };
 }
 
 function readOrgConfigs(env = process.env) {
@@ -52,6 +54,9 @@ const orgs = new Map();
 for (const c of readOrgConfigs()) {
   const { clientId, clientSecret, ...pub } = c;
   orgs.set(c.key, { ...pub, client: c.service ? createClient(c) : null });
+}
+for (const o of orgs.values()) {
+  if (o.allowAnthropic && isGovernmentOrg(o)) console.warn(`WARNING: org "${o.label || o.key}" is a government org but ALLOW_ANTHROPIC=true, so its masked transcripts can go to Anthropic's API, which is not FedRAMP authorized. Use this only for test orgs.`);
 }
 
 function getOrg(key) {

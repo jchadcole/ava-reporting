@@ -41,6 +41,8 @@ No Anthropic key is used. The AWS identity needs permission to invoke the chosen
 
 Orgs on Genesys Cloud's FedRAMP environment (`us-gov` regions such as `use2.us-gov-pure.cloud`), and any org with `GENESYS_<NAME>_GOVERNMENT=true`, are never sent to Anthropic's API: with `LLM_PROVIDER=anthropic` their analysis stays off and the page says why.
 
+For a government **test** org with test data, `GENESYS_<NAME>_ALLOW_ANTHROPIC=true` lets that one org use Anthropic's API anyway. The server prints a warning at startup and the page shows one while that org is open. Never set it for an org with real agency data.
+
 ## Sharing it (version 4)
 
 The dashboard can be shared, including as a tab inside Genesys Cloud, with each viewer signing in to Genesys so their own permissions decide what they see (`SIGN_IN=genesys`). It runs on any HTTPS server you control, and a daily job saves AVA turn data before Genesys ages it out (after about ten days), so longer date ranges work. Setup, hosting, FedRAMP notes and every new setting are in [docs/sharing-and-hosting.md](docs/sharing-and-hosting.md).
@@ -95,6 +97,7 @@ The OAuth client needs read access to analytics (bot aggregates, bot reporting t
 | `BEDROCK_API` | `mantle` | `mantle` (Bedrock's Messages endpoint) or `invoke` (bedrock-runtime InvokeModel) |
 | `BEDROCK_BASE_URL` | unset | Override the Bedrock endpoint, e.g. a FIPS or VPC endpoint |
 | `GENESYS_<NAME>_GOVERNMENT` | `false` | Mark an org as government so it is never sent to Anthropic's API (us-gov regions are marked automatically) |
+| `GENESYS_<NAME>_ALLOW_ANTHROPIC` | `false` | Let one government test org use Anthropic's API anyway (warning shown). Test data only |
 | `AVA_MODEL` | `claude-opus-5-5` | Claude model used for the analysis |
 | `AVA_ANALYSIS` | on | Set to `off` to stop sending transcripts even when a key is set |
 | `MAX_AVA_ANALYSES` | `300` | Sessions analyzed per date range load, newest first |
