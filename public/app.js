@@ -138,9 +138,16 @@
       showBanner('');
     }
     try {
+      if (!(await AvaAuth.ensure(state.org))) {
+        if (seq !== loadSeq) return;
+        showSignedOut();
+        return;
+      }
+      if (seq !== loadSeq) return;
+      if (!poll) { showArchiveNote(); renderAccount(); }
       const qs = new URLSearchParams(interval);
       if (state.org) qs.set('org', state.org);
-      const res = await fetch(`api/ava?${qs}`, { signal: loadAbort.signal });
+      const res = await AvaAuth.apiFetch(`api/ava?${qs}`, { signal: loadAbort.signal });
       const body = await res.json();
       if (seq !== loadSeq) return;
       if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
@@ -168,6 +175,57 @@
     } finally {
       if (seq === loadSeq) main.classList.remove('loading');
     }
+  }
+
+  // ---------- Per-viewer Genesys sign-in (SIGN_IN=genesys on the server) ----------
+  function showSignedOut() {
+    state.data = null;
+    $('main').hidden = true;
+    $('updated').textContent = '';
+    $('progress').hidden = true;
+    $('account').hidden = true;
+    const b = $('banner');
+    b.hidden = false;
+    b.classList.remove('error');
+    b.innerHTML = 'You are signed out. <button type="button" class="btn" id="sign-in">Sign in with Genesys Cloud</button>';
+    $('sign-in').addEventListener('click', () => AvaAuth.signIn(state.org));
+  }
+
+  let accountFor = null;
+  async function renderAccount() {
+    const el = $('account');
+    if (AvaAuth.mode !== 'genesys') { el.hidden = true; return; }
+    if (accountFor === state.org) return;
+    accountFor = state.org;
+    try {
+      const qs = new URLSearchParams(state.org ? { org: state.org } : {});
+      const res = await AvaAuth.apiFetch(`api/me?${qs}`);
+      const me = await res.json();
+      if (!res.ok) throw new Error(me.error);
+      $('account-name').textContent = me.name || me.email || 'Signed in';
+      $('account-name').title = [me.email, me.orgName].filter(Boolean).join(' · ');
+      el.hidden = false;
+    } catch {
+      accountFor = null;
+      el.hidden = true;
+    }
+  }
+
+  // Ranges older than Genesys keeps turn data for come from the server's daily archive.
+  function showArchiveNote() {
+    const org = state.orgs.find((o) => o.key === state.org);
+    const from = new Date(currentInterval().start);
+    const liveFrom = new Date(Date.now() - 10 * 86_400_000);
+    if (from >= liveFrom) return;
+    const saved = org?.archivedFrom ? new Date(`${org.archivedFrom}T00:00:00Z`) : null;
+    if (!saved) showBanner('Genesys keeps AVA turn data for about 10 days, and no older days have been saved for this org yet, so sessions older than that are missing. The server saves each day as it finishes once the daily archive runs.');
+    else if (from < saved) showBanner(`Saved turn data for this org starts on ${saved.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}, so sessions before then are missing.`);
+  }
+
+  function updateRangeOptions() {
+    const org = state.orgs.find((o) => o.key === state.org);
+    const archived = Boolean(org?.archivedFrom);
+    document.querySelectorAll('#f-range option[data-archive]').forEach((o) => { o.hidden = !archived; o.disabled = !archived; });
   }
 
   function showBanner(text, isError) {
@@ -482,9 +540,10 @@
     try {
       let detail = state.detailCache.get(s.id);
       if (!detail) {
-        const qs = new URLSearchParams({ botId: s.botId, sessionId: s.id });
+        // start lets the server find sessions older than Genesys keeps turns for in the archive.
+        const qs = new URLSearchParams({ botId: s.botId, sessionId: s.id, start: s.start || '' });
         if (state.org) qs.set('org', state.org);
-        const res = await fetch(`api/ava/session?${qs}`);
+        const res = await AvaAuth.apiFetch(`api/ava/session?${qs}`);
         detail = await res.json();
         if (!res.ok) throw new Error(detail.error || `Request failed (${res.status})`);
         state.detailCache.set(s.id, detail);
@@ -935,6 +994,7 @@
       const res = await fetch('api/orgs');
       const body = await res.json();
       state.orgs = body.orgs || [];
+      AvaAuth.configure(body.signIn, state.orgs);
     } catch {
       state.orgs = [];
     }
@@ -942,6 +1002,7 @@
     sel.innerHTML = state.orgs.map((o) => `<option value="${esc(o.key)}">${esc(o.label)}${o.error ? ` (${esc(o.error.toLowerCase())})` : ''}</option>`).join('');
     sel.value = state.org;
     sel.disabled = state.orgs.length < 2;
+    updateRangeOptions();
   }
 
   // Every panel under the Overview tiles can be collapsed from its heading; the choice is
@@ -978,7 +1039,11 @@
   }
 
   async function init() {
+    // Back from Genesys sign-in: this restores the address (and filters) from before it.
+    const signedIn = await AvaAuth.handleCallback();
+    if (signedIn?.org) state.org = signedIn.org;
     readHash();
+    if (signedIn?.org) state.org = signedIn.org;
     setupCollapsible();
     if (![...$('f-range').options].some((o) => o.value === state.range)) state.range = '7';
     $('f-range').value = state.range;
@@ -1010,6 +1075,7 @@
       for (const name of Object.keys(FLOWS)) Object.assign(state[name], { focus: [], intents: [] });
       state.detailCache.clear();
       state.page = 1;
+      updateRangeOptions();
       load();
     });
     $('f-range').addEventListener('change', (e) => {
@@ -1045,6 +1111,18 @@
     $('drawer-close').addEventListener('click', closeDrawer);
     $('drawer').addEventListener('click', (e) => { if (e.target === $('drawer')) closeDrawer(); });
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('drawer').classList.contains('open')) closeDrawer(); });
+    $('sign-out').addEventListener('click', async () => {
+      await AvaAuth.signOut();
+      accountFor = null;
+      showSignedOut();
+    });
+    if (signedIn?.error) {
+      // Don't send the viewer straight back to Genesys, which could loop; let them retry.
+      showSignedOut();
+      $('banner').prepend(`${signedIn.error} `);
+      $('banner').classList.add('error');
+      return;
+    }
     load();
   }
 

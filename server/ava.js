@@ -417,54 +417,134 @@ function queueAnalyses(orgKey, build, org) {
 
 // ---------- Build ----------
 // The Genesys part: AVA sessions and their raw turns. Cached by the server per org and range.
-async function buildAvaTurns(client, startIso, endIso) {
-  const { request } = client;
-  const startMs = Date.parse(startIso);
-  const endMs = Date.parse(endIso);
-  if (!(startMs < endMs)) throw Object.assign(new Error('start must be before end'), { status: 400 });
-  const interval = `${new Date(startMs).toISOString()}/${new Date(endMs).toISOString()}`;
+//
+// fetchRaw reads one interval from Genesys: bot names, preview sessions, AVA turns by bot and
+// session, and hand-offs. The daily archive (server/archive.js) saves the same pieces per day,
+// so ranges older than Genesys keeps turn data for can be rebuilt from disk.
+const AGG_WINDOW_MS = 30 * 86_400_000;
 
-  const [names, previews, details] = await Promise.all([
-    request(BOT_AGG, { interval, groupBy: ['botId', 'botName', 'botFlowType'], metrics: ['nBotSessions'] }),
-    // Sessions run from Architect's preview (test) mode; the browser hides them by default.
-    request(BOT_AGG, { interval, groupBy: ['botSessionId', 'previewMode'], metrics: ['nBotSessions'] }),
+async function fetchBots(request, startMs, endMs) {
+  const bots = new Map();
+  const previewIds = new Set();
+  for (let ws = startMs; ws < endMs; ws += AGG_WINDOW_MS) {
+    const interval = `${new Date(ws).toISOString()}/${new Date(Math.min(endMs, ws + AGG_WINDOW_MS)).toISOString()}`;
+    const [names, previews] = await Promise.all([
+      request(BOT_AGG, { interval, groupBy: ['botId', 'botName', 'botFlowType'], metrics: ['nBotSessions'] }),
+      // Sessions run from Architect's preview (test) mode; the browser hides them by default.
+      request(BOT_AGG, { interval, groupBy: ['botSessionId', 'previewMode'], metrics: ['nBotSessions'] }),
+    ]);
+    for (const r of names.results || []) {
+      const g = r.group;
+      if (!g.botId || g.botId.includes('?') || EXCLUDED_BOT_TYPES.has(g.botFlowType)) continue;
+      bots.set(g.botId, { id: g.botId, name: displayBotName(g.botId, g.botName), type: g.botFlowType || null });
+    }
+    for (const r of previews.results || []) if (String(r.group.previewMode) === 'true') previewIds.add(r.group.botSessionId);
+  }
+  return { bots, previewIds };
+}
+
+async function fetchRaw(request, startMs, endMs, { bots: knownBots } = {}) {
+  const interval = `${new Date(startMs).toISOString()}/${new Date(endMs).toISOString()}`;
+  const [{ bots, previewIds }, details] = await Promise.all([
+    knownBots ? { bots: knownBots.bots, previewIds: knownBots.previewIds } : fetchBots(request, startMs, endMs),
     fetchHandoffs(request, startMs, endMs).catch((err) => {
       console.error(`Conversation detail unavailable: ${err.message}`);
       return { handoffs: new Map(), truncated: true };
     }),
   ]);
-  const bots = new Map();
-  for (const r of names.results || []) {
-    const g = r.group;
-    if (!g.botId || g.botId.includes('?') || EXCLUDED_BOT_TYPES.has(g.botFlowType)) continue;
-    bots.set(g.botId, { id: g.botId, name: displayBotName(g.botId, g.botName), type: g.botFlowType || null });
-  }
-  const previewIds = new Set((previews.results || []).filter((r) => String(r.group.previewMode) === 'true').map((r) => r.group.botSessionId));
-
-  const sessions = [];
-  const turns = new Map();
+  const turnsByBot = new Map();
   let truncated = false;
   await mapLimit([...bots.values()], 4, async (bot) => {
     const res = await fetchAvaTurns(request, bot.id, interval);
     if (res.truncated) truncated = true;
-    for (const [id, list] of res.bySession) {
+    if (res.bySession.size) turnsByBot.set(bot.id, res.bySession);
+  });
+  return { bots, previewIds, turnsByBot, handoffs: details.handoffs, truncated, detailsTruncated: details.truncated };
+}
+
+const turnKey = (t) => t.turnId || t.id || `${t.dateCreated}|${t.askAction?.actionId || ''}|${t.userInput || ''}`;
+
+// Combine raw pieces (live and archived) into one: turns of the same session are merged and
+// de-duplicated, so a session that crosses midnight or the archive cut-off stays whole.
+function mergeRaw(parts) {
+  const out = { bots: new Map(), previewIds: new Set(), turnsByBot: new Map(), handoffs: new Map(), truncated: false, detailsTruncated: false };
+  for (const p of parts) {
+    for (const [id, b] of p.bots) if (!out.bots.has(id)) out.bots.set(id, b);
+    for (const id of p.previewIds) out.previewIds.add(id);
+    for (const [id, h] of p.handoffs) {
+      const prev = out.handoffs.get(id);
+      out.handoffs.set(id, prev ? { ...prev, ...Object.fromEntries(Object.entries(h).filter(([, v]) => v != null)) } : h);
+    }
+    out.truncated ||= p.truncated;
+    out.detailsTruncated ||= p.detailsTruncated;
+    for (const [botId, bySession] of p.turnsByBot) {
+      if (!out.turnsByBot.has(botId)) out.turnsByBot.set(botId, new Map());
+      const target = out.turnsByBot.get(botId);
+      for (const [sid, list] of bySession) {
+        if (!target.has(sid)) target.set(sid, new Map());
+        const seen = target.get(sid);
+        for (const t of list) seen.set(turnKey(t), t);
+      }
+    }
+  }
+  for (const bySession of out.turnsByBot.values()) for (const [sid, seen] of bySession) bySession.set(sid, [...seen.values()]);
+  return out;
+}
+
+// allowedBots: with per-viewer sign-in, archived sessions are only shown for bots the viewer's
+// own Genesys permissions return.
+function assemble(raw, startMs, endMs, allowedBots = null) {
+  const sessions = [];
+  const turns = new Map();
+  for (const [botId, bySession] of raw.turnsByBot) {
+    const bot = raw.bots.get(botId);
+    if (!bot || (allowedBots && !allowedBots.has(botId))) continue;
+    for (const [id, list] of bySession) {
       const s = summarizeAvaSession(id, list, bot);
-      s.preview = previewIds.has(id);
-      applyHandoff(s, details.handoffs.get(s.conversationId));
+      s.preview = raw.previewIds.has(id);
+      applyHandoff(s, raw.handoffs.get(s.conversationId));
       sessions.push(s);
       turns.set(id, list);
     }
-  });
+  }
   sessions.sort((a, b) => (b.start || '').localeCompare(a.start || ''));
   return {
     interval: { start: new Date(startMs).toISOString(), end: new Date(endMs).toISOString() },
     generatedAt: new Date().toISOString(),
     sessions,
     turns,
-    truncated,
-    detailsTruncated: details.truncated,
+    truncated: raw.truncated,
+    detailsTruncated: raw.detailsTruncated,
   };
 }
+
+// archive (optional): { days(startMs, endMs) -> saved day pieces, liveFrom } from server/archive.js.
+// Days before liveFrom that the archive has come from disk; everything else from Genesys.
+async function buildAvaTurns(client, startIso, endIso, { archive = null } = {}) {
+  const { request } = client;
+  const startMs = Date.parse(startIso);
+  const endMs = Date.parse(endIso);
+  if (!(startMs < endMs)) throw Object.assign(new Error('start must be before end'), { status: 400 });
+
+  let liveStart = startMs;
+  let saved = [];
+  if (archive) {
+    const r = archive.read(startMs, Math.min(endMs, archive.liveFrom()));
+    saved = r.days;
+    // Read live from the first day the archive does not cover.
+    liveStart = Math.max(startMs, r.coveredUntil);
+  }
+  if (!saved.length) return assemble(await fetchRaw(request, startMs, endMs), startMs, endMs);
+
+  // The viewer's (or service account's) own bot list for the whole range decides which
+  // archived bots are visible, and names bots that only exist in older days.
+  const visible = await fetchBots(request, startMs, endMs);
+  const live = liveStart < endMs ? await fetchRaw(request, liveStart, endMs, { bots: visible }) : null;
+  const raw = mergeRaw([...(live ? [live] : []), { ...emptyRaw(), bots: visible.bots, previewIds: visible.previewIds }, ...saved]);
+  return assemble(raw, startMs, endMs, client.user ? new Set(visible.bots.keys()) : null);
+}
+
+const emptyRaw = () => ({ bots: new Map(), previewIds: new Set(), turnsByBot: new Map(), handoffs: new Map(), truncated: false, detailsTruncated: false });
 
 // What the browser gets: the sessions with whatever analyses exist so far, plus progress.
 function avaResponse(orgKey, build, org) {
@@ -501,4 +581,4 @@ function avaResponse(orgKey, build, org) {
   };
 }
 
-module.exports = { buildAvaTurns, avaResponse, displayBotName, applyHandoff, summarizeHandoff, TRANSFER_REASONS, summarizeAvaSession, avaTranscript, analysisInput, turnIssues, isAvaTurn, VERDICTS, SCHEMA, status };
+module.exports = { buildAvaTurns, fetchRaw, fetchBots, mergeRaw, assemble, avaResponse, displayBotName, applyHandoff, summarizeHandoff, TRANSFER_REASONS, summarizeAvaSession, avaTranscript, analysisInput, turnIssues, isAvaTurn, VERDICTS, SCHEMA, status };

@@ -14,8 +14,13 @@
     try { localStorage.setItem(KEY, v); } catch { /* storage blocked, e.g. in some iframes */ }
   }
 
+  // The URL choice is kept for this tab, so it survives the round trip to Genesys sign-in.
   let fromUrl = null;
-  try { fromUrl = new URLSearchParams(location.search).get('theme'); } catch { /* ignore */ }
+  try {
+    fromUrl = new URLSearchParams(location.search).get('theme');
+    if (VALID.includes(fromUrl)) sessionStorage.setItem('ava-theme-url', fromUrl);
+    else fromUrl = sessionStorage.getItem('ava-theme-url');
+  } catch { /* ignore */ }
   let choice = VALID.includes(fromUrl) ? fromUrl : (VALID.includes(saved()) ? saved() : 'auto');
 
   function apply() {

@@ -4,7 +4,7 @@ Reporting for Genesys Cloud Agentic Virtual Agents (AVAs). This is dashboard v2:
 
 ## What's on the dashboard
 
-- **Filters**: Genesys org, date range (up to the last 10 days, since that is all the turn data Genesys keeps), AVA, channel, intent, valid response to all intents (yes, no, customer left first, no request, not analyzed yet), intent response (has a valid, partly valid or not valid one), Genesys flags, and preview sessions (left out by default). Filters apply to every panel and are kept in the URL.
+- **Filters**: Genesys org, date range (up to the last 10 days from Genesys, or 30, 60 and 90 days once the daily archive has saved older days), AVA, channel, intent, valid response to all intents (yes, no, customer left first, no request, not analyzed yet), intent response (has a valid, partly valid or not valid one), Genesys flags, and preview sessions (left out by default). Filters apply to every panel and are kept in the URL.
 - **Key metrics** (Overview tiles): AVA sessions, contained, abandoned, intents detected, tool call success and guardrail blocks. Every panel below the tiles can be collapsed from its heading, and the browser remembers which are collapsed.
 - **Containment**: contained and not-contained sessions by the rule that decided them (full task resolution, graceful partial containment, self-service deflection; or a supported intent not resolved, a transfer after an error or repeated misunderstanding, and so on), abandoned sessions by rule (frustration abandon, dead-end abandon, premature drop-off; or an escalation, deflection or other ending), and why transferred sessions went to a person. The rules and where each input comes from are on the page.
 - **Intents**: each intent with its sessions and how many responses were valid, partly valid, not valid, or cut off because the customer left. Select a row to filter.
@@ -41,11 +41,17 @@ No Anthropic key is used. The AWS identity needs permission to invoke the chosen
 
 Orgs on Genesys Cloud's FedRAMP environment (`us-gov` regions such as `use2.us-gov-pure.cloud`), and any org with `GENESYS_<NAME>_GOVERNMENT=true`, are never sent to Anthropic's API: with `LLM_PROVIDER=anthropic` their analysis stays off and the page says why.
 
+## Sharing it (version 4)
+
+The dashboard can be shared, including as a tab inside Genesys Cloud, with each viewer signing in to Genesys so their own permissions decide what they see (`SIGN_IN=genesys`). It runs on any HTTPS server you control, and a daily job saves AVA turn data before Genesys ages it out (after about ten days), so longer date ranges work. Setup, hosting, FedRAMP notes and every new setting are in [docs/sharing-and-hosting.md](docs/sharing-and-hosting.md).
+
 ## How it works
 
 ```
-browser ── /api/ava, /api/ava/session ──▶ Node server ── OAuth client credentials ──▶ Genesys Cloud
-                                                   └──── masked AVA transcripts ──▶ Claude (optional)
+browser ── /api/ava, /api/ava/session ──▶ Node server ── viewer's token (SIGN_IN=genesys) ──▶ Genesys Cloud
+                                              │       or OAuth client credentials
+                                              ├──── masked AVA transcripts ──▶ Claude (optional)
+                                              └──── daily: finished days of turns ──▶ data/turns (archive)
 ```
 
 | Data | Genesys API |
@@ -75,7 +81,8 @@ The OAuth client needs read access to analytics (bot aggregates, bot reporting t
 | `GENESYS_CLIENT_ID`, `GENESYS_CLIENT_SECRET` | – | Single-org client credentials |
 | `GENESYS_REGION` | `mypurecloud.com` | Region domain, such as `usw2.pure.cloud` |
 | `HOST`, `PORT` | `127.0.0.1`, `3000` | Where the server listens |
-| `DASHBOARD_USER`, `DASHBOARD_PASSWORD` | unset | Turn on HTTP basic auth. Set these, or put the app behind SSO, before exposing it beyond your machine. |
+| `DASHBOARD_USER`, `DASHBOARD_PASSWORD` | unset | Turn on HTTP basic auth. Use these or `SIGN_IN=genesys` before exposing it beyond your machine. |
+| `SIGN_IN`, `TLS_*`, `ARCHIVE_*` and others | – | Per-viewer sign-in, HTTPS and the turn archive: see [docs/sharing-and-hosting.md](docs/sharing-and-hosting.md) |
 | `MAX_RANGE_DAYS` | `92` | Longest date range allowed |
 | `MAX_DETAIL_CONVERSATIONS` | `5000` | Conversation detail cap per load; beyond it, transfers come only from the AVA's own ending |
 | `MAX_TURN_PAGES_PER_BOT` | `40` | Pages of 250 turns read per bot |
