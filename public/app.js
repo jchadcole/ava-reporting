@@ -140,7 +140,7 @@
     try {
       if (!(await AvaAuth.ensure(state.org))) {
         if (seq !== loadSeq) return;
-        showSignedOut();
+        showSignedOut(AvaAuth.signedOut ? null : 'Your dashboard sign-in needs renewing.');
         return;
       }
       if (seq !== loadSeq) return;
@@ -163,6 +163,10 @@
       if (body.analysis.pending) pollTimer = setTimeout(() => load({ poll: true }), POLL_MS);
     } catch (err) {
       if (seq !== loadSeq || err.name === 'AbortError') return;
+      if (err.needsSignIn) {
+        showSignedOut('Your dashboard sign-in has expired.');
+        return;
+      }
       if (poll) {
         pollTimer = setTimeout(() => load({ poll: true }), POLL_MS * 2);
         return;
@@ -178,17 +182,38 @@
   }
 
   // ---------- Per-viewer Genesys sign-in (SIGN_IN=genesys on the server) ----------
-  function showSignedOut() {
+  // In the Genesys Cloud Apps tab, Sign in opens a small pop-up that usually closes by itself.
+  function showSignedOut(reason, isError) {
     state.data = null;
     $('main').hidden = true;
     $('updated').textContent = '';
     $('progress').hidden = true;
     $('account').hidden = true;
+    accountFor = null;
     const b = $('banner');
     b.hidden = false;
-    b.classList.remove('error');
-    b.innerHTML = 'You are signed out. <button type="button" class="btn" id="sign-in">Sign in with Genesys Cloud</button>';
-    $('sign-in').addEventListener('click', () => AvaAuth.signIn(state.org));
+    b.classList.toggle('error', !!isError);
+    b.textContent = `${reason || 'You are signed out.'} `;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.textContent = 'Sign in with Genesys Cloud';
+    b.appendChild(btn);
+    if (AvaAuth.inFrame) {
+      const note = document.createElement('span');
+      note.className = 'muted';
+      note.textContent = ' A small sign-in window opens and closes on its own.';
+      b.appendChild(note);
+    }
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.textContent = 'Signing in…';
+      try {
+        if (await AvaAuth.signIn(state.org)) load();
+      } catch (err) {
+        showSignedOut(err.message, true);
+      }
+    });
   }
 
   let accountFor = null;
@@ -1042,6 +1067,7 @@
   async function init() {
     // Back from Genesys sign-in: this restores the address (and filters) from before it.
     const signedIn = await AvaAuth.handleCallback();
+    if (signedIn?.popup) return; // this window was only the sign-in pop-up
     if (signedIn?.org) state.org = signedIn.org;
     readHash();
     if (signedIn?.org) state.org = signedIn.org;
@@ -1119,9 +1145,7 @@
     });
     if (signedIn?.error) {
       // Don't send the viewer straight back to Genesys, which could loop; let them retry.
-      showSignedOut();
-      $('banner').prepend(`${signedIn.error} `);
-      $('banner').classList.add('error');
+      showSignedOut(signedIn.error, true);
       return;
     }
     load();

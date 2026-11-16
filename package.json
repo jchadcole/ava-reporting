@@ -1,6 +1,6 @@
 {
   "name": "ava-reporting",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "private": true,
   "description": "Intent and response-quality reporting for Genesys Cloud Agentic Virtual Agents (AVA)",
   "license": "MIT",

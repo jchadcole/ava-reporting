@@ -113,10 +113,40 @@ function readBody(req, limit = 16_384) {
   });
 }
 
+// Pop-up sign-in relay. Inside the Genesys Cloud Apps tab, the dashboard is in a frame, and
+// an identity provider such as Okta refuses to show its login page in a frame. So the frame
+// opens Genesys sign-in in a pop-up instead. The pop-up is a separate browser context that
+// can't see the frame's storage, so it hands the one-time code back through the server, keyed
+// by the random state the frame created. The code alone is useless: trading it for a token
+// needs the PKCE verifier, which never leaves the frame.
+const RELAY_TTL_MS = 3 * 60_000;
+const relay = new Map(); // state -> { code, expires }
+const STATE_PATTERN = /^p\.[A-Za-z0-9_-]{20,64}$/;
+
+function relayPut(state, code) {
+  for (const [k, v] of relay) if (v.expires <= Date.now()) relay.delete(k);
+  if (relay.size > 1000) throw Object.assign(new Error('Too many sign-ins in progress'), { status: 400 });
+  relay.set(state, { code, expires: Date.now() + RELAY_TTL_MS });
+}
+
+function relayTake(state) {
+  const hit = relay.get(state);
+  if (!hit || hit.expires <= Date.now()) return null;
+  relay.delete(state);
+  return hit.code;
+}
+
 async function handleAuth(req, res, url) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' });
   if (SIGN_IN !== 'genesys') return sendJson(res, 404, { error: 'Not found' });
   const body = await readBody(req);
+  if (url.pathname === '/auth/relay' || url.pathname === '/auth/relay/take') {
+    if (typeof body.state !== 'string' || !STATE_PATTERN.test(body.state)) return sendJson(res, 400, { error: 'Invalid sign-in state' });
+    if (url.pathname === '/auth/relay/take') return sendJson(res, 200, { code: relayTake(body.state) });
+    if (typeof body.code !== 'string' || !body.code || body.code.length > 2000) return sendJson(res, 400, { error: 'Invalid sign-in code' });
+    relayPut(body.state, body.code);
+    return sendJson(res, 200, { ok: true });
+  }
   const org = getOrg(body.org);
   if (url.pathname === '/auth/token') return sendJson(res, 200, await exchangeCode(org, body));
   if (url.pathname === '/auth/signout') {

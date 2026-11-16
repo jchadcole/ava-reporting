@@ -116,6 +116,13 @@ test('server: security headers allow framing by Genesys only, and API needs a vi
     const res = await fetch(`${base}/api/ava?start=2026-11-01T00:00:00Z&end=2026-11-02T00:00:00Z`);
     assert.equal(res.status, 401);
     assert.equal((await res.json()).signIn, true);
+    // Pop-up sign-in relay: the code is handed over once, for a well-formed state only.
+    const state = 'p.' + 'a'.repeat(32);
+    assert.equal((await fetch(`${base}/auth/relay`, { method: 'POST', body: JSON.stringify({ state: 'short', code: 'c' }) })).status, 400);
+    assert.equal((await fetch(`${base}/auth/relay`, { method: 'POST', body: JSON.stringify({ state, code: 'c1' }) })).status, 200);
+    const take = () => fetch(`${base}/auth/relay/take`, { method: 'POST', body: JSON.stringify({ state }) }).then((r) => r.json());
+    assert.equal((await take()).code, 'c1');
+    assert.equal((await take()).code, null);
     const bad = await fetch(`${base}/auth/token`, { method: 'POST', body: JSON.stringify({ code: 'x', verifier: 'short', redirectUri: base }) });
     assert.equal(bad.status, 400);
   } finally {
