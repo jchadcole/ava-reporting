@@ -16,6 +16,7 @@ With `SIGN_IN=genesys`:
 - The browser uses the OAuth Authorization Code grant with PKCE, so no client secret is involved in signing in. The token lives only in that browser tab (sessionStorage) and in the server's memory; nothing is written to disk.
 - The server checks each token once with Genesys (`GET /api/v2/tokens/me`): it must have been issued to this dashboard's sign-in client, and to the expected org when `GENESYS_<NAME>_ORG_ID` is set.
 - Someone already signed in to Genesys Cloud (for example, opening the Client App tab) goes straight through without seeing a login page.
+- Inside the Client App tab, when the dashboard's sign-in has to be renewed and Genesys would hand it to your identity provider (Okta, Azure AD and so on, which refuse to load in a frame), the page shows a **Sign in with Genesys Cloud** button instead. It opens a small pop-up that closes on its own. Allow pop-ups for the dashboard's address if the browser blocks it.
 - Cached results are kept per viewer, so nobody is shown data fetched with someone else's permissions.
 - Claude's saved intent analyses are shared, but each viewer only sees analyses for the sessions their own Genesys query returns.
 
